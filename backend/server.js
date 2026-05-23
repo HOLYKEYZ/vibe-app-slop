@@ -1,4 +1,6 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 const { BedrockRuntimeClient, ConverseStreamCommand } = require('@aws-sdk/client-bedrock-runtime');
@@ -49,8 +51,36 @@ const server = http.createServer((req, res) => {
     }));
     return;
   }
+  if (url.pathname === '/download' || url.pathname === '/') {
+    const apkPath = path.join(__dirname, '..', 'AgentHub', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
+    const hasApk = fs.existsSync(apkPath);
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Hub</title><style>
+      *{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+      .card{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid rgba(139,92,246,.3);border-radius:20px;padding:40px 30px;text-align:center;max-width:400px;width:100%}
+      .icon{font-size:64px;margin-bottom:16px}h1{font-size:28px;margin-bottom:8px}p{color:#888;margin-bottom:24px;font-size:14px}
+      .btn{display:inline-block;background:linear-gradient(135deg,#8B5CF6,#6D28D9);color:#fff;text-decoration:none;padding:16px 40px;border-radius:12px;font-size:18px;font-weight:600}
+      .hint{color:#555;font-size:12px;margin-top:20px}input{padding:10px;border-radius:8px;border:0;width:100%;margin:8px 0;background:#1e1e24;color:#fff;font-size:14px}
+    </style></head><body>
+    <div class="card">
+      <div class="icon">🤖</div>
+      <h1>Agent Hub</h1>
+      <p>Control Codex, OpenCode, Windsurf &amp; Kiro from your phone</p>
+      ${hasApk ? `<a href="/apk" class="btn">⬇ Install APK (${(fs.statSync(apkPath).size / 1024 / 1024).toFixed(1)} MB)</a>` : `<p style="color:#e88">APK not on this server.</p><p class="hint">Build locally with <code>cd AgentHub && ./gradlew assembleDebug</code> then run <code>node serve-apk.js</code> on your LAN.</p>`}
+      <p class="hint">After installing, open the app and scan the QR code from your laptop's relay terminal.</p>
+    </div></body></html>`);
+    return;
+  }
+  if (url.pathname === '/apk' && req.method === 'GET') {
+    const apkPath = path.join(__dirname, '..', 'AgentHub', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
+    if (!fs.existsSync(apkPath)) { res.writeHead(404); res.end('APK not found'); return; }
+    const stat = fs.statSync(apkPath);
+    res.writeHead(200, { 'Content-Type': 'application/vnd.android.package-archive', 'Content-Disposition': 'attachment; filename="AgentHub.apk"', 'Content-Length': stat.size });
+    fs.createReadStream(apkPath).pipe(res);
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Agent Hub Backend');
+  res.end('Agent Hub Backend — see /download');
 });
 
 const wss = new WebSocketServer({ server });
