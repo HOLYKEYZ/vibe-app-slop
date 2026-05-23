@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const { BedrockRuntimeClient, ConverseStreamCommand } = require('@aws-sdk/client-bedrock-runtime');
 
 const PORT = process.env.PORT || 3001;
-const RELAY_GRACE_MS = 5 * 60 * 1000;
+const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const CHARSET = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
 
 const DEFAULTS = {
@@ -18,6 +18,28 @@ const DEFAULTS = {
 };
 
 const sessions = new Map();
+
+function loadSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
+      for (const [code, s] of Object.entries(data)) {
+        sessions.set(code, { ...s, relayWs: null, phoneWs: null, reconnectTimer: null });
+      }
+      console.log(`Loaded ${Object.keys(data).length} persisted sessions`);
+    }
+  } catch (e) { console.error('Failed to load sessions:', e.message); }
+}
+
+function saveSessions() {
+  try {
+    const obj = {};
+    for (const [code, s] of sessions) {
+      obj[code] = { code: s.code, config: s.config, createdAt: s.createdAt, state: s.state };
+    }
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) { console.error('Failed to save sessions:', e.message); }
+}
 
 function generateCode() {
   const b = crypto.randomBytes(10);
@@ -100,6 +122,7 @@ wss.on('connection', (ws) => {
       sessions.set(code, session);
       ws._code = code; ws._role = 'relay';
       send(ws, { type: 'relay_registered', code });
+      saveSessions();
       console.log(`[relay] ${code} registered`);
       return;
     }
@@ -113,6 +136,7 @@ wss.on('connection', (ws) => {
       if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
       send(ws, { type: 'session_joined', code, relay_online: s.relayWs?.readyState === 1, config: s.config || {} });
       if (s.relayWs?.readyState === 1) send(s.relayWs, { type: 'phone_connected' });
+      saveSessions();
       console.log(`[phone] ${code} joined`);
       return;
     }
@@ -123,6 +147,7 @@ wss.on('connection', (ws) => {
         Object.assign(s.config, msg.config || {});
         if (s.phoneWs?.readyState === 1) send(s.phoneWs, { type: 'config_updated', config: s.config });
         send(ws, { type: 'system', content: 'Config updated' });
+        saveSessions();
       }
       return;
     }
@@ -167,11 +192,9 @@ wss.on('connection', (ws) => {
     const s = ws._code ? sessions.get(ws._code) : null;
     if (!s) return;
     if (ws._role === 'relay') {
-      s.relayWs = null; s.state = 'offline_grace';
+      s.relayWs = null;
       send(s.phoneWs, { type: 'status', content: '⚡ Desktop relay offline. Using cloud mode.' });
-      s.reconnectTimer = setTimeout(() => {
-        if (!s.relayWs) { s.state = 'expired'; send(s.phoneWs, { type: 'system', content: '❌ Relay session expired. Relaunch relay to renew.' }); }
-      }, RELAY_GRACE_MS);
+      saveSessions();
     } else if (ws._role === 'phone') {
       s.phoneWs = null;
     }
@@ -306,6 +329,8 @@ async function runKiroCloud(ws, cfg, prompt) {
     send(ws, { type: 'done', content: '\n✅ Kiro complete.' });
   } catch (err) { send(ws, { type: 'error', content: `Kiro error: ${err.message}` }); }
 }
+
+loadSessions();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Agent Hub Backend on port ${PORT}`);

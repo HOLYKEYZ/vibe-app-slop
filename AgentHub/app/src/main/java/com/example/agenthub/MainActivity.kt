@@ -85,16 +85,9 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
     var sessionCode by remember { mutableStateOf(prefs.getString("SESSION_CODE", "") ?: "") }
     var serverUrl by remember { mutableStateOf(prefs.getString("SERVER_URL", "wss://agent-hub-backend-wk48.onrender.com") ?: "") }
-    var showAdvanced by remember { mutableStateOf(false) }
-
-    var codexSession by remember { mutableStateOf(prefs.getString("CODEX_SESSION", "") ?: "") }
-    var opencodeSession by remember { mutableStateOf(prefs.getString("OPENCODE_SESSION", "") ?: "") }
-    var windsurfSession by remember { mutableStateOf(prefs.getString("WINDSURF_SESSION", "") ?: "") }
-    var kiroSession by remember { mutableStateOf(prefs.getString("KIRO_SESSION", "") ?: "") }
-    var codexModel by remember { mutableStateOf(prefs.getString("CODEX_MODEL", "") ?: "") }
-    var opencodeModel by remember { mutableStateOf(prefs.getString("OPENCODE_MODEL", "") ?: "") }
-    var windsurfModel by remember { mutableStateOf(prefs.getString("WINDSURF_MODEL", "") ?: "") }
-    var kiroModel by remember { mutableStateOf(prefs.getString("KIRO_MODEL", "") ?: "") }
+    fun stripAnsi(str: String): String {
+        return str.replace(Regex("\\u001B\\[[;\\d]*[A-Za-z]"), "").replace(Regex("\\u001B\\]\\d+;[^\\u0007]*\\u0007"), "")
+    }
 
     val listState = rememberLazyListState()
 
@@ -112,19 +105,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     j.put("code", sessionCode)
                     ws.send(j.toString())
                 } else {
-                    val j = JSONObject()
-                    j.put("type", "config")
-                    val c = JSONObject()
-                    c.put("CODEX_SESSION", codexSession)
-                    c.put("OPENCODE_SESSION", opencodeSession)
-                    c.put("WINDSURF_SESSION", windsurfSession)
-                    c.put("KIRO_SESSION", kiroSession)
-                    if (codexModel.isNotBlank()) c.put("CODEX_MODEL", codexModel)
-                    if (opencodeModel.isNotBlank()) c.put("OPENCODE_MODEL", opencodeModel)
-                    if (windsurfModel.isNotBlank()) c.put("WINDSURF_MODEL", windsurfModel)
-                    if (kiroModel.isNotBlank()) c.put("KIRO_MODEL", kiroModel)
-                    j.put("config", c)
-                    ws.send(j.toString())
+                    logs = logs + LogLine(System.currentTimeMillis(), "system", "Enter a session code in Settings to connect")
                 }
             }
 
@@ -134,13 +115,6 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     when (json.optString("type")) {
                         "session_joined" -> {
                             relayOnline = json.optBoolean("relay_online", false)
-                            val cfg = json.optJSONObject("config")
-                            if (cfg != null) {
-                                if (cfg.has("CODEX_SESSION") && codexSession.isBlank()) codexSession = cfg.getString("CODEX_SESSION")
-                                if (cfg.has("OPENCODE_SESSION") && opencodeSession.isBlank()) opencodeSession = cfg.getString("OPENCODE_SESSION")
-                                if (cfg.has("WINDSURF_SESSION") && windsurfSession.isBlank()) windsurfSession = cfg.getString("WINDSURF_SESSION")
-                                if (cfg.has("KIRO_SESSION") && kiroSession.isBlank()) kiroSession = cfg.getString("KIRO_SESSION")
-                            }
                             logs = logs + LogLine(System.currentTimeMillis(), "system",
                                 if (relayOnline) "Connected to relay session" else "Cloud mode (laptop offline)")
                         }
@@ -247,26 +221,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 unfocusedTextColor = Color.White, focusedTextColor = Color.White, cursorColor = Color.White)
                         )
 
-                        Spacer(Modifier.height(16.dp))
-                        HorizontalDivider(color = Color(0xFF333340))
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                            Text(if (showAdvanced) "Hide API Keys" else "Manual API Keys (optional)",
-                                color = Color(0xFF8B5CF6), fontSize = 13.sp)
-                        }
 
-                        if (showAdvanced) {
-                            SmallField("CODEX_KEY", codexSession) { codexSession = it }
-                            SmallField("OPENCODE_KEY", opencodeSession) { opencodeSession = it }
-                            SmallField("WINDSURF_KEY", windsurfSession) { windsurfSession = it }
-                            SmallField("KIRO_KEY", kiroSession) { kiroSession = it }
-                            Spacer(Modifier.height(8.dp))
-                            Text("Models (optional)", color = Color.Gray, fontSize = 12.sp)
-                            SmallField("CODEX_MODEL", codexModel) { codexModel = it }
-                            SmallField("OPENCODE_MODEL", opencodeModel) { opencodeModel = it }
-                            SmallField("WINDSURF_MODEL", windsurfModel) { windsurfModel = it }
-                            SmallField("KIRO_MODEL", kiroModel) { kiroModel = it }
-                        }
                     }
                 }
             },
@@ -276,10 +231,6 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     TextButton(onClick = {
                         prefs.edit()
                             .putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
-                            .putString("CODEX_SESSION", codexSession).putString("OPENCODE_SESSION", opencodeSession)
-                            .putString("WINDSURF_SESSION", windsurfSession).putString("KIRO_SESSION", kiroSession)
-                            .putString("CODEX_MODEL", codexModel).putString("OPENCODE_MODEL", opencodeModel)
-                            .putString("WINDSURF_MODEL", windsurfModel).putString("KIRO_MODEL", kiroModel)
                             .apply()
                         showSettings = false
                         connectWs()
@@ -379,7 +330,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     }
                     items(consolidated) { log ->
                         val color = when (log.agent) { "user" -> Color.White; "system" -> Color(0xFF888888); else -> Color(0xFFA7F3D0) }
-                        Text(log.text, color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+                        Text(stripAnsi(log.text), color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
                             modifier = Modifier.padding(vertical = 1.dp))
                     }
                 }
@@ -410,11 +361,3 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     }
 }
 
-@Composable
-private fun SmallField(label: String, value: String, onValueChange: (String) -> Unit) {
-    Spacer(Modifier.height(4.dp))
-    OutlinedTextField(value = value, onValueChange = onValueChange, label = { Text(label, color = Color.Gray) },
-        singleLine = true, modifier = Modifier.height(56.dp),
-        colors = OutlinedTextFieldDefaults.colors(unfocusedTextColor = Color.White, focusedTextColor = Color.White,
-            cursorColor = Color.White, unfocusedBorderColor = Color(0xFF333340)))
-}
