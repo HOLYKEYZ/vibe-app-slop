@@ -82,8 +82,12 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === '/download' || url.pathname === '/') {
-    const apkPath = path.join(__dirname, '..', 'AgentHub', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
-    const hasApk = fs.existsSync(apkPath);
+    const apkPaths = [
+      path.join(__dirname, '..', 'AgentHub', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+      path.join(__dirname, 'app-debug.apk'),
+    ];
+    const apkPath = apkPaths.find(p => fs.existsSync(p));
+    const hasApk = !!apkPath;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Hub</title><style>
       *{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
@@ -102,8 +106,12 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === '/apk' && req.method === 'GET') {
-    const apkPath = path.join(__dirname, '..', 'AgentHub', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
-    if (!fs.existsSync(apkPath)) { res.writeHead(404); res.end('APK not found'); return; }
+    const apkPaths = [
+      path.join(__dirname, '..', 'AgentHub', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+      path.join(__dirname, 'app-debug.apk'),
+    ];
+    const apkPath = apkPaths.find(p => fs.existsSync(p));
+    if (!apkPath) { res.writeHead(404); res.end('APK not found'); return; }
     const stat = fs.statSync(apkPath);
     res.writeHead(200, { 'Content-Type': 'application/vnd.android.package-archive', 'Content-Disposition': 'attachment; filename="AgentHub.apk"', 'Content-Length': stat.size });
     fs.createReadStream(apkPath).pipe(res);
