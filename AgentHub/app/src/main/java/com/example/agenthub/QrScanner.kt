@@ -2,7 +2,9 @@ package com.example.agenthub
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.util.Log
 import android.util.Size
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -31,6 +33,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 fun QrScanner(onScan: (String) -> Unit, onCancel: () -> Unit) {
@@ -56,20 +59,12 @@ fun QrScanner(onScan: (String) -> Unit, onCancel: () -> Unit) {
 
         Button(
             onClick = onCancel,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 40.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .width(200.dp),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 40.dp).clip(RoundedCornerShape(24.dp)).width(200.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8B5CF6))
         ) { Text("Cancel", color = Color.White, fontSize = 16.sp) }
 
-        Text(
-            "Point camera at QR code",
-            color = Color.White,
-            fontSize = 14.sp,
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 50.dp)
-        )
+        Text("Point camera at QR code", color = Color.White, fontSize = 14.sp,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 50.dp))
     }
 }
 
@@ -86,38 +81,42 @@ fun CameraPreview(onScan: (String) -> Unit) {
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
 
                 cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                    try {
+                        val cameraProvider = cameraProviderFuture.get()
+                        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                        val imageAnalysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
 
-                    val imageAnalysis = ImageAnalysis.Builder()
-                        .setTargetResolution(Size(1280, 720))
-                        .setBackpressureStrategy(STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
+                        imageAnalysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                            val closed = AtomicBoolean(false)
+                            val safeClose = { if (!closed.getAndSet(true)) imageProxy.close() }
 
-                    imageAnalysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
-                        val mediaImage = imageProxy.image
-                        if (mediaImage != null) {
-                            val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                            analyzer.process(inputImage)
-                                .addOnSuccessListener { barcodes ->
-                                    for (barcode in barcodes) {
-                                        barcode.rawValue?.let { value ->
-                                            imageProxy.close()
-                                            onScan(value)
-                                            return@addOnSuccessListener
+                            val mediaImage = imageProxy.image
+                            if (mediaImage != null) {
+                                val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                                analyzer.process(inputImage)
+                                    .addOnSuccessListener { barcodes ->
+                                        for (barcode in barcodes) {
+                                            barcode.rawValue?.let { value ->
+                                                safeClose()
+                                                onScan(value)
+                                                return@addOnSuccessListener
+                                            }
                                         }
                                     }
-                                }
-                                .addOnCompleteListener { imageProxy.close() }
-                        } else {
-                            imageProxy.close()
+                                    .addOnCompleteListener { safeClose() }
+                            } else {
+                                safeClose()
+                            }
                         }
-                    }
 
-                    try {
                         cameraProvider.unbindAll()
                         cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis)
-                    } catch (e: Exception) { e.printStackTrace() }
+                    } catch (e: Exception) {
+                        Log.e("CameraPreview", "Camera init failed", e)
+                        Toast.makeText(context, "Camera error: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                 }, ContextCompat.getMainExecutor(ctx))
 
                 previewView

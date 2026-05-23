@@ -33,7 +33,7 @@ function readCodexConfig() {
 
 function readOpenCodeConfig() {
   try {
-    const authPath = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'opencode', 'auth.json');
+    const authPath = path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
     if (!fs.existsSync(authPath)) return {};
     const auth = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
     const cfg = {};
