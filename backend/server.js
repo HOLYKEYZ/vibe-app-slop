@@ -150,7 +150,9 @@ wss.on('connection', (ws) => {
       s.phoneWs = ws;
       ws._code = code; ws._role = 'phone';
       if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
-      send(ws, { type: 'session_joined', code, relay_online: s.relayWs?.readyState === 1, config: s.config || {}, available_models: AGENT_MODELS });
+      const agentModel = {};
+      for (const [a, key] of Object.entries(MODEL_KEY)) { if (s.config?.[key]) agentModel[a] = s.config[key]; }
+      send(ws, { type: 'session_joined', code, relay_online: s.relayWs?.readyState === 1, config: s.config || {}, available_models: AGENT_MODELS, agent_model: agentModel });
       if (s.relayWs?.readyState === 1) send(s.relayWs, { type: 'phone_connected' });
       saveSessions();
       console.log(`[phone] ${code} joined`);

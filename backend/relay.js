@@ -8,7 +8,24 @@ const QRCode = require('qrcode');
 const SERVER_URL = process.env.SERVER_URL || 'ws://localhost:3001';
 const isWin = os.platform() === 'win32';
 
-// ─── Read API keys from local configs ───────────────────────────
+const AGENTS = [
+  { id: 'codex',    name: 'Codex',    configKey: 'CODEX_SESSION',  modelKey: 'CODEX_MODEL',  cmd: process.env.CODEX_PATH || 'codex',               args: p => ['exec', '--dangerously-bypass-approvals-and-sandbox', p] },
+  { id: 'opencode', name: 'OpenCode', configKey: 'OPENCODE_SESSION', modelKey: 'OPENCODE_MODEL', cmd: null, args: p => ['run', '--dangerously-skip-permissions', '--format', 'json', p] },
+  { id: 'windsurf', name: 'Windsurf', configKey: 'WINDSURF_SESSION', modelKey: 'WINDSURF_MODEL', cmd: null, args: p => [p] },
+  { id: 'kiro',     name: 'Kiro',     configKey: 'KIRO_SESSION',   modelKey: 'KIRO_MODEL',   cmd: null, args: p => [p] },
+];
+
+function getCmd(a) {
+  if (a.cmd) return a.cmd;
+  if (a.id === 'opencode') {
+    if (isWin) {
+      const fp = path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE, 'AppData', 'Local'), 'OpenCode', 'opencode-cli.exe');
+      try { fs.accessSync(fp); return fp; } catch {}
+    }
+    return 'opencode';
+  }
+  return a.id;
+}
 
 function readCodexConfig() {
   try {
@@ -16,14 +33,12 @@ function readCodexConfig() {
     if (!fs.existsSync(authPath)) return {};
     const auth = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
     const cfg = {};
-    // Model from config.toml
     const configPath = path.join(os.homedir(), '.codex', 'config.toml');
     if (fs.existsSync(configPath)) {
       const raw = fs.readFileSync(configPath, 'utf-8');
       const model = raw.match(/model\s*=\s*"([^"]+)"/)?.[1];
       if (model) cfg.CODEX_MODEL = model;
     }
-    // Auth tokens from auth.json (ChatGPT OAuth)
     const token = auth.tokens?.access_token;
     if (token) cfg.CODEX_SESSION = token;
     if (auth.OPENAI_API_KEY) cfg.CODEX_SESSION = auth.OPENAI_API_KEY;
@@ -37,15 +52,12 @@ function readOpenCodeConfig() {
     if (!fs.existsSync(authPath)) return {};
     const auth = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
     const cfg = {};
-    const providers = {};
     for (const [provider, creds] of Object.entries(auth)) {
       const key = creds.key || creds.api_key || creds.apiKey || creds.token;
       if (key) {
-        providers[provider] = String(key);
         if (!cfg.OPENCODE_SESSION) cfg.OPENCODE_SESSION = String(key);
       }
     }
-    if (Object.keys(providers).length > 1) cfg.OPENCODE_PROVIDERS = providers;
     return cfg;
   } catch { return {}; }
 }
@@ -76,26 +88,17 @@ function readKiroConfig() {
 }
 
 function readLocalConfig() {
-  return {
-    ...readCodexConfig(),
-    ...readOpenCodeConfig(),
-    ...readWindsurfConfig(),
-    ...readKiroConfig(),
-  };
+  return { ...readCodexConfig(), ...readOpenCodeConfig(), ...readWindsurfConfig(), ...readKiroConfig() };
 }
 
-// ─── Detect CLI paths ──────────────────────────────────────────
+// ─── Detect available agents ──────────────────────────────────
 
-const CODEX_CMD = process.env.CODEX_PATH || 'codex';
-function getOpenCodeCmd() {
-  if (isWin) {
-    const fp = path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE, 'AppData', 'Local'), 'OpenCode', 'opencode-cli.exe');
-    try { fs.accessSync(fp); return fp; } catch {}
-  }
-  return 'opencode';
+function getAvailableAgents() {
+  const cfg = readLocalConfig();
+  return AGENTS.filter(a => cfg[a.configKey]);
 }
 
-// ─── WebSocket connection ──────────────────────────────────────
+// ─── WebSocket ────────────────────────────────────────────────
 
 let ws, reconnectTimer, sessionCode;
 
@@ -114,17 +117,17 @@ function connect() {
 
     if (msg.type === 'relay_registered') {
       sessionCode = msg.code;
-      console.log(`\n🔗 Session code: ${sessionCode}`);
-      printQR(msg.code);
+      console.log(`\n🔗 Relay session: ${sessionCode}\n`);
+      printAgentQRCodes(sessionCode);
       return;
     }
 
     if (msg.type === 'execute') {
       const { agent, prompt, clientId } = msg;
-      console.log(`\n📩 Execute: ${agent} ← "${prompt.slice(0, 60)}..."`);
+      console.log(`\n📩 ${agent}: "${prompt.slice(0, 80)}..."`);
       await executeAgent(agent, prompt, clientId);
     } else if (msg.type === 'system' || msg.type === 'phone_connected') {
-      console.log(`ℹ️  ${msg.type}: ${msg.content || ''}`);
+      console.log(`ℹ️  ${msg.content || msg.type}`);
     }
   });
 
@@ -146,44 +149,51 @@ function send(obj) {
   if (ws?.readyState === 1) ws.send(JSON.stringify(obj));
 }
 
-function printQR(code) {
-  const qrPayload = `${SERVER_URL}?code=${code}`;
-  QRCode.toString(qrPayload, { type: 'terminal', small: true }, (err, qr) => {
-    if (err) return;
-    console.log(`\n═══════════════════════════════════════`);
-    console.log(`📱 SCAN THIS QR CODE WITH AGENT HUB APP`);
-    console.log(`═══════════════════════════════════════`);
-    console.log(qr);
-    console.log(`   Session Code: ${code}`);
-    console.log(`   Server:       ${SERVER_URL}`);
-    console.log(`   URL:          ${qrPayload}`);
-    console.log(`═══════════════════════════════════════\n`);
-    // Also show a compact URL-only version
-    console.log(`   Or enter code manually: ${code}\n`);
-  });
-  // Also write QR to a text file for easy access
-  try {
-    const qrFile = path.join(__dirname, '..', 'session_qr.txt');
-    QRCode.toString(qrPayload, { type: 'utf8', small: true }, (err, qr) => {
+function printAgentQRCodes(code) {
+  const agents = getAvailableAgents();
+  const qrFile = path.join(__dirname, '..', 'session_qr.txt');
+  let fileContent = '';
+
+  agents.forEach((a, i) => {
+    const qrPayload = `${SERVER_URL}?code=${code}&agent=${a.id}`;
+    if (i > 0) console.log('');
+    QRCode.toString(qrPayload, { type: 'terminal', small: true }, (err, qr) => {
       if (err) return;
-      fs.writeFileSync(qrFile, `Session: ${code}\nServer: ${SERVER_URL}\nURL: ${qrPayload}\n\n${qr}\n`);
+      console.log(`═══════════════════════════════════════`);
+      console.log(`  ${a.name}`);
+      console.log(`═══════════════════════════════════════`);
+      console.log(qr);
+      console.log(`   Code: ${code}`);
+      console.log(`   Agent: ${a.name}`);
+      console.log(`═══════════════════════════════════════\n`);
     });
+    fileContent += `Agent: ${a.name} (${a.id})\nCode: ${code}\nURL: ${qrPayload}\n\n`;
+
+    // Also print a compact one-liner
+    console.log(`  [${a.id}] Code: ${code}  |  URL: ${qrPayload}\n`);
+  });
+
+  if (agents.length === 0) {
+    console.log('⚠️  No agents detected (no API keys found).');
+    console.log('   Install and configure codex, opencode, or others.\n');
+  }
+
+  try {
+    if (fileContent) fs.writeFileSync(qrFile, fileContent);
   } catch {}
 }
 
-// ─── Agent execution ───────────────────────────────────────────
+// ─── Agent execution ──────────────────────────────────────────
 
 function executeAgent(agent, prompt, clientId) {
   return new Promise((resolve) => {
-    let cmd, args;
-    switch (agent.toLowerCase()) {
-      case 'codex': cmd = CODEX_CMD; args = ['exec', '--dangerously-bypass-approvals-and-sandbox', prompt]; break;
-      case 'opencode': cmd = getOpenCodeCmd(); args = ['run', '--dangerously-skip-permissions', '--format', 'json', prompt]; break;
-      default: send({ type: 'error', clientId, content: `Unknown agent: ${agent}` }); resolve(); return;
-    }
+    const a = AGENTS.find(x => x.id === agent);
+    if (!a) { send({ type: 'error', clientId, content: `Unknown agent: ${agent}` }); resolve(); return; }
 
+    const cmd = getCmd(a);
+    const args = a.args(prompt);
     console.log(`  $ ${cmd} ${args.join(' ')}`);
-    send({ type: 'status', clientId, content: `🔄 Running ${agent} locally...` });
+    send({ type: 'status', clientId, content: `🔄 ${a.name}...` });
 
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
     let doneSent = false, fullOutput = '', jsonBuffer = '';
@@ -192,15 +202,24 @@ function executeAgent(agent, prompt, clientId) {
       const text = data.toString();
       fullOutput += text;
 
-      if (agent.toLowerCase() === 'opencode') {
+      if (agent === 'opencode') {
         jsonBuffer += text;
         const lines = jsonBuffer.split('\n');
         jsonBuffer = lines.pop() || '';
         for (const line of lines) {
           if (!line.trim()) continue;
-          try { const ev = JSON.parse(line); if (ev.type === 'content' && ev.content) send({ type: 'replace_stream', clientId, content: ev.content }); }
-          catch { send({ type: 'stream', clientId, content: line + '\n' }); }
+          try {
+            const ev = JSON.parse(line);
+            if (ev.type === 'content' && ev.content) {
+              send({ type: 'replace_stream', clientId, content: ev.content });
+            }
+          } catch {
+            // Skip non-JSON lines (progress spinners, status, etc.)
+          }
         }
+      } else if (agent === 'codex') {
+        // Codex output is mostly AI text. Forward cleanly, strip ANSI.
+        send({ type: 'replace_stream', clientId, content: text });
       } else {
         send({ type: 'stream', clientId, content: text });
       }
@@ -210,25 +229,22 @@ function executeAgent(agent, prompt, clientId) {
     child.stderr.on('data', handleData);
     child.on('error', (err) => { if (!doneSent) { doneSent = true; send({ type: 'error', clientId, content: `Failed: ${err.message}` }); resolve(); } });
     child.on('close', (code) => {
-      if (!doneSent) { doneSent = true; send({ type: 'done', clientId, content: code === 0 ? `\n✅ ${agent} done.` : `\n⚠️ ${agent} exit ${code}` }); }
+      if (!doneSent) { doneSent = true; send({ type: 'done', clientId, content: code === 0 ? '' : `\n⚠️ Exit ${code}` }); }
       resolve();
     });
-    setTimeout(() => { if (!doneSent) { doneSent = true; child.kill(); send({ type: 'done', clientId, content: `\n⏱️ ${agent} timed out.` }); resolve(); } }, 10 * 60 * 1000);
+    setTimeout(() => { if (!doneSent) { doneSent = true; child.kill(); send({ type: 'done', clientId, content: '\n⏱️ Timeout' }); resolve(); } }, 10 * 60 * 1000);
   });
 }
 
-// ─── Start ─────────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────
 
 console.log('═══════════════════════════════════════');
 console.log('  Agent Hub — Desktop Relay');
 console.log('═══════════════════════════════════════');
-console.log(`  Codex:    ${CODEX_CMD}`);
-console.log(`  OpenCode: ${getOpenCodeCmd()}`);
-console.log(`  Server:   ${SERVER_URL}`);
 
-const localCfg = readLocalConfig();
-const found = Object.keys(localCfg);
-console.log(`  Config:   ${found.length ? found.join(', ') : 'none found (manual entry needed)'}`);
+const agents = getAvailableAgents();
+console.log(`  Agents:   ${agents.length ? agents.map(a => a.name).join(', ') : 'none'}`);
+console.log(`  Server:   ${SERVER_URL}`);
 console.log('═══════════════════════════════════════\n');
 
 connect();
