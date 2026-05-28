@@ -31,6 +31,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -109,6 +112,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var availableAgents by remember { mutableStateOf(listOf<String>()) }
     var sessions by remember { mutableStateOf(listOf<RemoteSession>()) }
     var selectedSessionId by remember { mutableStateOf(prefs.getString("SELECTED_SESSION_ID", "") ?: "") }
+    var selectedSessionTitle by remember { mutableStateOf(prefs.getString("SELECTED_SESSION_TITLE", "") ?: "") }
     var agentModels by remember { mutableStateOf(listOf<String>()) }
     var currentModel by remember { mutableStateOf("") }
 
@@ -138,7 +142,10 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     }
 
     fun stripAnsi(str: String): String {
-        return str.replace(Regex("\\u001B\\[[;\\d]*[A-Za-z]"), "").replace(Regex("\\u001B\\]\\d+;[^\\u0007]*\\u0007"), "")
+        return str
+            .replace(Regex("\\u001B(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~]|\\][^\\u0007]*(?:\\u0007|\\u001B\\\\))"), "")
+            .replace(Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]"), "")
+            .replace("\r", "")
     }
 
     fun requestSessions(agent: String = currentAgent) {
@@ -173,10 +180,11 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     }
 
     val listState = rememberLazyListState()
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val connectWs = {
+        wsStatus = "connecting"
         webSocket?.close(1000, "Reconnecting")
-        logs = emptyList()
         val request = try {
             Request.Builder().url(serverUrl.trim()).build()
         } catch (e: Exception) {
@@ -224,17 +232,42 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 } else {
                                     logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
                                 }
-                                if (relayOnline) requestSessions(currentAgent)
+                                if (relayOnline) {
+                                    requestSessions(currentAgent)
+                                    if (selectedSessionId.isNotBlank() && currentAgent.isNotBlank()) {
+                                        requestSessionDetail(RemoteSession(currentAgent, selectedSessionId, selectedSessionTitle, ""))
+                                    }
+                                }
                             }
-                            "sessions" -> sessions = parseSessions(json.optJSONArray("sessions") ?: JSONArray())
+                            "sessions" -> {
+                                sessions = parseSessions(json.optJSONArray("sessions") ?: JSONArray())
+                                sessions.firstOrNull { it.id == selectedSessionId }?.let {
+                                    selectedSessionTitle = it.title
+                                    prefs.edit().putString("SELECTED_SESSION_TITLE", it.title).apply()
+                                }
+                            }
                             "session_detail" -> {
                                 val detail = json.optJSONObject("detail")
                                 val messages = detail?.optJSONArray("messages")
                                 if (messages != null) {
-                                    val text = (0 until messages.length()).joinToString("\n\n") { i ->
+                                    val history = (0 until messages.length()).joinToString("\n\n") { i ->
                                         val m = messages.optJSONObject(i)
-                                        "${m?.optString("role") ?: "message"}: ${m?.optString("text") ?: ""}"
+                                        val role = m?.optString("role") ?: "message"
+                                        val type = m?.optString("type") ?: "message"
+                                        val text = stripAnsi(m?.optString("text") ?: "")
+                                        if (type == "command") "command: $text" else "$role: $text"
                                     }.trim()
+                                    val files = detail.optJSONArray("files")
+                                    val fileText = if (files != null && files.length() > 0) {
+                                        (0 until minOf(files.length(), 12)).joinToString("\n", prefix = "\n\nfiles:\n") { i -> "- ${files.optString(i)}" }
+                                    } else ""
+                                    val commands = detail.optJSONArray("commands")
+                                    val commandText = if (commands != null && commands.length() > 0) {
+                                        (0 until minOf(commands.length(), 8)).joinToString("\n", prefix = "\n\ncommands:\n") { i ->
+                                            "- ${stripAnsi(commands.optJSONObject(i)?.optString("command") ?: "")}"
+                                        }
+                                    } else ""
+                                    val text = (history + fileText + commandText).trim()
                                     if (text.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), text, "replace")
                                 }
                             }
@@ -266,16 +299,33 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         if (request != null) webSocket = OkHttpAgent.client.newWebSocket(request, listener)
     }
 
-    DisposableEffect(serverUrl) { connectWs(); onDispose { webSocket?.close(1000, "Closing") } }
+    DisposableEffect(serverUrl) {
+        connectWs()
+        onDispose { webSocket?.close(1000, "Closing") }
+    }
+
+    DisposableEffect(lifecycleOwner, serverUrl, sessionCode) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && sessionCode.isNotBlank() && wsStatus != "connected") {
+                connectWs()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(logs.size) { if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1) }
 
     val sendMsg = {
         if (input.isNotBlank() && wsStatus == "connected" && currentAgent.isNotBlank()) {
+            if (currentAgent == "codex" && selectedSessionId.isBlank()) {
+                logs = logs + LogLine(System.currentTimeMillis(), "Pick a Codex chat first. This prevents starting a new terminal session by accident.")
+            } else {
             logs = logs + LogLine(System.currentTimeMillis(), "> $input")
             val j = JSONObject(); j.put("agent", currentAgent); j.put("prompt", input)
             if (selectedSessionId.isNotBlank()) j.put("sessionId", selectedSessionId)
             webSocket?.send(j.toString()); input = ""
+            }
         }
     }
 
@@ -292,12 +342,13 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             if (params.containsKey("code")) sessionCode = params["code"] ?: ""
             if (params.containsKey("agent")) currentAgent = params["agent"] ?: ""
             selectedSessionId = ""
+            selectedSessionTitle = ""
             if (raw.startsWith("ws") || raw.startsWith("wss")) {
                 val port = if (uri.port > 0) ":${uri.port}" else ""
                 serverUrl = "${uri.scheme}://${uri.host}$port"
             }
             prefs.edit().putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
-                .putString("CURRENT_AGENT", currentAgent).putString("SELECTED_SESSION_ID", "").apply()
+                .putString("CURRENT_AGENT", currentAgent).putString("SELECTED_SESSION_ID", "").putString("SELECTED_SESSION_TITLE", "").apply()
             connectWs()
         } catch (_: Exception) {
             sessionCode = raw
@@ -310,6 +361,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     }
 
     val isConnected = wsStatus == "connected"
+    val canPrompt = isConnected && currentAgent.isNotBlank() && (currentAgent != "codex" || selectedSessionId.isNotBlank())
 
     // ─── QR Scanner ──────────────────────────────────────────────
     if (showQrScanner) { QrScanner(onScan = onQrScanned, onCancel = { showQrScanner = false }); return }
@@ -444,14 +496,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
         if (sessions.isNotEmpty()) {
             LazyColumn(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 132.dp).clip(RoundedCornerShape(12.dp))
+                modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp).clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF15161A)).padding(8.dp)
             ) {
                 item {
                     Text("Chats", color = Color(0xFF8B5CF6), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(4.dp))
                 }
-                items(sessions.take(12)) { session ->
+                items(sessions.take(40)) { session ->
                     val selected = session.id == selectedSessionId
                     Row(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
@@ -459,7 +511,9 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             .clickable {
                                 currentAgent = session.agent
                                 selectedSessionId = session.id
-                                prefs.edit().putString("CURRENT_AGENT", session.agent).putString("SELECTED_SESSION_ID", session.id).apply()
+                                selectedSessionTitle = session.title
+                                prefs.edit().putString("CURRENT_AGENT", session.agent).putString("SELECTED_SESSION_ID", session.id)
+                                    .putString("SELECTED_SESSION_TITLE", session.title).apply()
                                 requestSessionDetail(session)
                             }
                             .padding(horizontal = 8.dp, vertical = 6.dp),
@@ -527,16 +581,16 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(
                 onClick = { startVoiceInput() },
-                enabled = isConnected && currentAgent.isNotBlank(),
+                enabled = canPrompt,
                 modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF1E1E24))
             ) {
-                Icon(Icons.Default.Mic, contentDescription = "Voice prompt", tint = if (isConnected && currentAgent.isNotBlank()) Color(0xFFA7F3D0) else Color(0xFF333333))
+                Icon(Icons.Default.Mic, contentDescription = "Voice prompt", tint = if (canPrompt) Color(0xFFA7F3D0) else Color(0xFF333333))
             }
             Spacer(Modifier.width(8.dp))
             TextField(
                 value = input, onValueChange = { input = it },
                 modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).height(48.dp),
-                enabled = isConnected && currentAgent.isNotBlank(),
+                enabled = canPrompt,
                 colors = TextFieldDefaults.colors(focusedContainerColor = Color(0xFF1E1E24), unfocusedContainerColor = Color(0xFF1E1E24),
                     focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
@@ -544,15 +598,17 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 placeholder = { Text(
                     if (!isConnected) "Connect to send prompts"
                     else if (currentAgent.isBlank()) "Set agent in Settings"
+                    else if (currentAgent == "codex" && selectedSessionId.isBlank()) "Pick a Codex chat first"
+                    else if (selectedSessionTitle.isNotBlank()) "Prompt ${selectedSessionTitle.take(24)}..."
                     else "Prompt $agentName...",
                     color = if (isConnected && currentAgent.isNotBlank()) Color.Gray else Color(0xFF333333)) }
             )
             Spacer(Modifier.width(8.dp))
             Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(
-                if (isConnected && currentAgent.isNotBlank()) Color(0xFF8B5CF6) else Color(0xFF1E1E24))
-                .clickable(enabled = isConnected && currentAgent.isNotBlank()) { sendMsg() },
+                if (canPrompt) Color(0xFF8B5CF6) else Color(0xFF1E1E24))
+                .clickable(enabled = canPrompt) { sendMsg() },
                 contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Send, contentDescription = "Send", tint = if (isConnected && currentAgent.isNotBlank()) Color.White else Color(0xFF333333))
+                Icon(Icons.Default.Send, contentDescription = "Send", tint = if (canPrompt) Color.White else Color(0xFF333333))
             }
         }
     }

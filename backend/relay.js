@@ -12,7 +12,7 @@ const WORKSPACE_CWD = path.resolve(process.env.AGENTHUB_CWD || process.env.WORKS
 const isWin = os.platform() === 'win32';
 
 const AGENTS = [
-  { id: 'codex',    name: 'Codex',    modelKey: 'CODEX_MODEL',    cmd: process.env.CODEX_PATH || 'codex', args: p => ['exec', '--dangerously-bypass-approvals-and-sandbox', p], localPromptCli: true },
+  { id: 'codex',    name: 'Codex',    modelKey: 'CODEX_MODEL',    cmd: process.env.CODEX_PATH || 'codex', args: p => ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', p], localPromptCli: true, jsonExec: true },
   { id: 'opencode', name: 'OpenCode', modelKey: 'OPENCODE_MODEL', cmd: null, args: p => ['run', '--dangerously-skip-permissions', '--format', 'json', p], localPromptCli: true, serverBacked: true },
 ];
 
@@ -41,6 +41,18 @@ function spawnAgentCommand(cmd, args) {
     env: { ...process.env },
     windowsHide: true,
   });
+}
+
+function spawnCodexCommand(args) {
+  const nodeLaunch = resolveCodexNodeLaunch(args);
+  if (nodeLaunch) {
+    return spawn(nodeLaunch.command, nodeLaunch.args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+      windowsHide: true,
+    });
+  }
+  return spawnAgentCommand(process.env.CODEX_PATH || 'codex', args);
 }
 
 function buildWindowsCommandLine(cmd, args) {
@@ -178,8 +190,9 @@ function connect() {
       send({ type: 'sessions', clientId: msg.clientId, sessions });
     } else if (msg.type === 'session_detail') {
       try {
-        if (msg.agent !== 'opencode') throw new Error('Detailed transcript view is currently available for OpenCode sessions.');
-        const detail = await getOpenCodeSessionDetail(msg.sessionId);
+        const detail = msg.agent === 'opencode'
+          ? await getOpenCodeSessionDetail(msg.sessionId)
+          : await getCodexSessionDetail(msg.sessionId);
         send({ type: 'session_detail', clientId: msg.clientId, detail });
       } catch (err) {
         send({ type: 'error', clientId: msg.clientId, content: err.message });
@@ -286,6 +299,180 @@ function toOpenCodeSession(item) {
   };
 }
 
+function stripTerminalNoise(value) {
+  return String(value || '')
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/gu, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/gu, '')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+function truncateText(value, max = 140) {
+  const text = stripTerminalNoise(value).replace(/\s+/g, ' ').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1)}...`;
+}
+
+function readJsonLine(line) {
+  try { return JSON.parse(line); } catch { return null; }
+}
+
+function codexSessionsRoot() {
+  return path.join(os.homedir(), '.codex', 'sessions');
+}
+
+function collectJsonlFiles(dir, out = []) {
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) collectJsonlFiles(full, out);
+    else if (entry.isFile() && entry.name.endsWith('.jsonl')) out.push(full);
+  }
+  return out;
+}
+
+function readCodexIndexTitles() {
+  const titles = new Map();
+  const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
+  if (!fs.existsSync(indexPath)) return titles;
+  for (const line of fs.readFileSync(indexPath, 'utf-8').split(/\r?\n/).filter(Boolean)) {
+    const item = readJsonLine(line);
+    if (item?.id) titles.set(item.id, item.thread_name || item.title || item.id);
+  }
+  return titles;
+}
+
+function extractTextParts(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map((part) => {
+    if (!part) return '';
+    if (typeof part === 'string') return part;
+    return part.text || part.message || part.output || '';
+  }).filter(Boolean).join('\n');
+}
+
+function parseCodexRollout(file, includeEvents = false) {
+  const stat = fs.statSync(file);
+  const lines = fs.readFileSync(file, 'utf-8').split(/\r?\n/).filter(Boolean);
+  const messages = [];
+  const commands = [];
+  const tools = [];
+  const files = new Set();
+  let meta = {};
+  let firstUserText = '';
+
+  for (const line of lines) {
+    const ev = readJsonLine(line);
+    if (!ev) continue;
+    const payload = ev.payload || {};
+    const time = ev.timestamp || payload.timestamp || null;
+
+    if (ev.type === 'session_meta') {
+      meta = { ...meta, ...payload };
+      continue;
+    }
+
+    if (ev.type === 'response_item') {
+      if (payload.type === 'message') {
+        const role = payload.role || 'message';
+        if (!['user', 'assistant'].includes(role)) continue;
+        const text = stripTerminalNoise(extractTextParts(payload.content));
+        if (text && !isHiddenCodexText(text)) {
+          if (role === 'user' && !firstUserText) firstUserText = text;
+          messages.push({ role, text, time, type: 'message' });
+        }
+      } else if (includeEvents && payload.type === 'function_call') {
+        const name = payload.name || 'tool';
+        const args = stripTerminalNoise(payload.arguments || '');
+        if (name === 'shell_command' && args) {
+          const command = extractCommandFromArgs(args);
+          commands.push({ name, command: command || truncateText(args, 500), time });
+          messages.push({ role: 'tool', text: `command: ${command || truncateText(args, 700)}`, time, type: 'command' });
+        } else {
+          tools.push({ name, arguments: truncateText(args, 700), time });
+          messages.push({ role: 'tool', text: `${name}: ${truncateText(args, 700)}`, time, type: 'tool' });
+        }
+        for (const candidate of extractPathsFromText(args)) files.add(candidate);
+      } else if (includeEvents && payload.type === 'function_call_output') {
+        const text = stripTerminalNoise(payload.output || '');
+        for (const candidate of extractPathsFromText(text)) files.add(candidate);
+      }
+      continue;
+    }
+
+    if (ev.type === 'event_msg') {
+      if (payload.type === 'user_message') {
+        const text = stripTerminalNoise(payload.message || '');
+        if (text && !firstUserText) firstUserText = text;
+      } else if (payload.type === 'agent_message') {
+        const text = stripTerminalNoise(payload.message || '');
+        if (text && !isHiddenCodexText(text)) messages.push({ role: 'assistant', text, time, type: 'message' });
+      } else if (includeEvents && /tool|exec|browser|file|patch|command/i.test(payload.type || '')) {
+        const compact = truncateText(JSON.stringify(payload), 1000);
+        tools.push({ name: payload.type || 'event', arguments: compact, time });
+        messages.push({ role: 'tool', text: `${payload.type || 'event'}: ${compact}`, time, type: 'event' });
+      }
+    }
+  }
+
+  return {
+    id: meta.id || path.basename(file, '.jsonl'),
+    file,
+    meta,
+    firstUserText,
+    messages: dedupeAdjacentMessages(messages),
+    commands,
+    tools,
+    files: [...files],
+    updatedAt: stat.mtimeMs,
+    createdAt: stat.birthtimeMs || stat.ctimeMs,
+  };
+}
+
+function isHiddenCodexText(text) {
+  return /^Workspace:\s+/i.test(text)
+    || /^<environment_context>/i.test(text)
+    || text.includes('You are Codex, a coding agent')
+    || text.includes('# Instructions');
+}
+
+function dedupeAdjacentMessages(messages) {
+  const out = [];
+  for (const msg of messages) {
+    const prev = out[out.length - 1];
+    if (prev && prev.role === msg.role && prev.text === msg.text) continue;
+    out.push(msg);
+  }
+  return out;
+}
+
+function extractCommandFromArgs(raw) {
+  try {
+    const obj = JSON.parse(raw);
+    return obj.command || '';
+  } catch {
+    return '';
+  }
+}
+
+function extractPathsFromText(raw) {
+  const text = String(raw || '');
+  const matches = text.match(/[A-Z]:\\[^\s"',)]+|(?:\.{0,2}\/)?[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)+/g) || [];
+  return matches.map((m) => m.replace(/\\+/g, '\\')).filter((m) => /\.[A-Za-z0-9]{1,8}$/.test(m)).slice(0, 50);
+}
+
+function getCodexRollouts(limit = 200) {
+  return collectJsonlFiles(codexSessionsRoot())
+    .map((file) => {
+      try { return { file, mtime: fs.statSync(file).mtimeMs }; } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, limit)
+    .map((item) => item.file);
+}
+
 async function listOpenCodeSessions() {
   try {
     await ensureOpenCodeServer();
@@ -297,23 +484,29 @@ async function listOpenCodeSessions() {
 }
 
 function listCodexSessions() {
-  const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
-  if (!fs.existsSync(indexPath)) return [];
-  const lines = fs.readFileSync(indexPath, 'utf-8').split(/\r?\n/).filter(Boolean).slice(-100);
-  return lines.map((line) => {
+  const titles = readCodexIndexTitles();
+  return getCodexRollouts(200).map((file) => {
     try {
-      const item = JSON.parse(line);
+      const parsed = parseCodexRollout(file, false);
+      const cwd = parsed.meta.cwd || '';
+      const project = cwd ? path.basename(cwd) : 'Codex';
+      const title = titles.get(parsed.id) || truncateText(parsed.firstUserText, 72) || parsed.id;
       return {
         agent: 'codex',
-        id: item.id,
-        title: item.thread_name || item.id,
-        subtitle: 'Codex',
-        updatedAt: item.updated_at ? Date.parse(item.updated_at) : 0,
+        id: parsed.id,
+        title,
+        subtitle: cwd ? `${project} - ${cwd}` : 'Codex',
+        directory: cwd,
+        project,
+        path: file,
+        updatedAt: parsed.updatedAt,
+        createdAt: parsed.createdAt,
+        originator: parsed.meta.originator || '',
       };
     } catch {
       return null;
     }
-  }).filter(Boolean).reverse();
+  }).filter(Boolean);
 }
 
 async function listLocalSessions(agent) {
@@ -365,6 +558,35 @@ async function getOpenCodeSessionDetail(sessionId) {
   };
 }
 
+function findCodexRollout(sessionId) {
+  for (const file of getCodexRollouts(500)) {
+    try {
+      const parsed = parseCodexRollout(file, false);
+      if (parsed.id === sessionId || path.basename(file, '.jsonl').includes(sessionId)) return file;
+    } catch {}
+  }
+  return null;
+}
+
+async function getCodexSessionDetail(sessionId) {
+  const file = findCodexRollout(sessionId);
+  if (!file) throw new Error(`Codex session not found: ${sessionId}`);
+  const parsed = parseCodexRollout(file, true);
+  return {
+    agent: 'codex',
+    sessionId: parsed.id,
+    title: truncateText(parsed.firstUserText, 90) || parsed.id,
+    directory: parsed.meta.cwd || '',
+    project: parsed.meta.cwd ? path.basename(parsed.meta.cwd) : '',
+    path: file,
+    updatedAt: parsed.updatedAt,
+    messages: parsed.messages.slice(-160),
+    files: parsed.files,
+    commands: parsed.commands.slice(-50),
+    tools: parsed.tools.slice(-50),
+  };
+}
+
 async function createOpenCodeSession() {
   await ensureOpenCodeServer();
   const json = await requestJson(`${OPENCODE_BASE_URL}/session`, {
@@ -402,6 +624,108 @@ async function sendOpenCodePrompt(prompt, clientId, sessionId) {
     const current = statuses[target];
     if (!current || current.status === 'idle' || current === 'idle') break;
   }
+  send({ type: 'done', clientId, content: '' });
+}
+
+function codexExecArgs(prompt, sessionId) {
+  if (sessionId) {
+    return ['exec', 'resume', '--json', '--dangerously-bypass-approvals-and-sandbox', sessionId, prompt];
+  }
+  return ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', prompt];
+}
+
+function formatCodexJsonEvent(ev) {
+  const payload = ev?.payload || {};
+  if (ev?.type === 'response_item') {
+    if (payload.type === 'message') {
+      const role = payload.role || 'assistant';
+      const text = stripTerminalNoise(extractTextParts(payload.content));
+      if (!text || isHiddenCodexText(text)) return null;
+      return role === 'assistant' ? { kind: 'stream', text } : null;
+    }
+    if (payload.type === 'function_call') {
+      const name = payload.name || 'tool';
+      const command = name === 'shell_command' ? extractCommandFromArgs(payload.arguments || '') : '';
+      return { kind: 'status', text: command ? `command: ${command}` : `tool: ${name}` };
+    }
+    if (payload.type === 'function_call_output') {
+      const text = stripTerminalNoise(payload.output || '');
+      return text ? { kind: 'status', text: truncateText(text, 900) } : null;
+    }
+  }
+  if (ev?.type === 'event_msg') {
+    if (payload.type === 'agent_message') {
+      const text = stripTerminalNoise(payload.message || '');
+      return text && !isHiddenCodexText(text) ? { kind: 'stream', text } : null;
+    }
+    if (payload.type === 'task_started') return { kind: 'status', text: 'Codex started' };
+    if (payload.type === 'task_complete') return { kind: 'status', text: 'Codex finished' };
+  }
+  return null;
+}
+
+async function sendCodexPrompt(prompt, clientId, sessionId) {
+  if (!sessionId) {
+    throw new Error('Pick a Codex chat first. This build blocks accidental new Codex sessions from the phone.');
+  }
+
+  const a = AGENTS.find((x) => x.id === 'codex');
+  const cmd = getCmd(a);
+  if (!commandExists(cmd)) throw new Error('Codex CLI not found on PATH.');
+  const args = codexExecArgs(prompt, sessionId);
+  console.log(`  [codex-json] $ ${cmd} ${args.join(' ')}`);
+  send({ type: 'status', clientId, content: `Sending to Codex chat ${sessionId}` });
+
+  await new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawnCodexCommand(args);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    let buffer = '';
+    let fullText = '';
+    let done = false;
+
+    function consume(data) {
+      const text = data.toString();
+      fullText += text;
+      buffer += text;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const ev = readJsonLine(line);
+        if (!ev) continue;
+        const formatted = formatCodexJsonEvent(ev);
+        if (!formatted) continue;
+        if (formatted.kind === 'stream') send({ type: 'replace_stream', clientId, content: formatted.text });
+        else send({ type: 'status', clientId, content: formatted.text });
+      }
+    }
+
+    child.stdout.on('data', consume);
+    child.stderr.on('data', consume);
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (done) return;
+      done = true;
+      if (code === 0) resolve();
+      else reject(new Error(stripTerminalNoise(fullText).slice(-1200) || `Codex exited ${code}`));
+    });
+
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { child.kill(); } catch {}
+      reject(new Error('Codex timed out after 10 minutes.'));
+    }, 10 * 60 * 1000);
+  });
+
+  const detail = await getCodexSessionDetail(sessionId).catch(() => null);
+  if (detail) send({ type: 'session_detail', clientId, detail });
   send({ type: 'done', clientId, content: '' });
 }
 
@@ -540,6 +864,16 @@ function executeAgent(agent, prompt, clientId, sessionId = '') {
       return;
     }
 
+    if (agent === 'codex') {
+      try {
+        await sendCodexPrompt(prompt, clientId, sessionId);
+      } catch (err) {
+        send({ type: 'error', clientId, content: `Codex failed: ${err.message}` });
+      }
+      resolve();
+      return;
+    }
+
     if (process.env.AGENTHUB_ONE_SHOT !== '1') {
       try {
         executePtyAgent(agent, prompt, clientId, sessionId);
@@ -613,7 +947,7 @@ const agents = getAvailableAgents();
 console.log(`  Agents:   ${agents.length ? agents.map(a => a.name).join(', ') : 'none'}`);
 console.log(`  Server:   ${SERVER_URL}`);
 console.log(`  Cwd:      ${WORKSPACE_CWD}`);
-console.log(`  Mode:     ${pty ? 'persistent PTY' : 'one-shot fallback'}`);
+console.log(`  Mode:     Codex JSON resume + OpenCode session server${pty ? ' + PTY fallback' : ''}`);
 console.log('═══════════════════════════════════════\n');
 
 connect();
