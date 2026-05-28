@@ -48,6 +48,7 @@ import com.example.agenthub.theme.AgentHubTheme
 import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.delay
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -122,10 +123,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var currentAgent by remember { mutableStateOf(prefs.getString("CURRENT_AGENT", "") ?: "") }
     var availableAgents by remember { mutableStateOf(listOf<String>()) }
     var sessions by remember { mutableStateOf(listOf<RemoteSession>()) }
+    var sessionsLoading by remember { mutableStateOf(false) }
+    var sessionsNotice by remember { mutableStateOf("") }
     var selectedSessionId by remember { mutableStateOf(prefs.getString("SELECTED_SESSION_ID", "") ?: "") }
     var selectedSessionTitle by remember { mutableStateOf(prefs.getString("SELECTED_SESSION_TITLE", "") ?: "") }
     var agentModels by remember { mutableStateOf(listOf<String>()) }
     var currentModel by remember { mutableStateOf("") }
+    var connectionSeq by remember { mutableStateOf(0L) }
+    var hasPausedOnce by remember { mutableStateOf(false) }
 
     var sessionCode by remember { mutableStateOf(prefs.getString("SESSION_CODE", "") ?: "") }
     var serverUrl by remember { mutableStateOf(prefs.getString("SERVER_URL", "wss://agent-hub-backend-wk48.onrender.com") ?: "") }
@@ -159,20 +164,25 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             .replace("\r", "")
     }
 
-    fun requestSessions(agent: String = currentAgent) {
+    fun requestSessions(agent: String = "", socket: WebSocket? = webSocket) {
         val j = JSONObject()
         j.put("type", "session_list")
         if (agent.isNotBlank()) j.put("agent", agent)
-        webSocket?.send(j.toString())
+        sessionsLoading = true
+        sessionsNotice = "Loading chats..."
+        if (socket?.send(j.toString()) != true) {
+            sessionsLoading = false
+            sessionsNotice = "Could not request chats. Reconnect the relay."
+        }
     }
 
-    fun requestSessionDetail(session: RemoteSession) {
+    fun requestSessionDetail(session: RemoteSession, socket: WebSocket? = webSocket) {
         if (session.id.isBlank()) return
         val j = JSONObject()
         j.put("type", "session_detail")
         j.put("agent", session.agent)
         j.put("sessionId", session.id)
-        webSocket?.send(j.toString())
+        socket?.send(j.toString())
     }
 
     fun parseSessions(arr: JSONArray): List<RemoteSession> {
@@ -229,11 +239,15 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     val listState = rememberLazyListState()
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val connectWs = {
+    val connectWs = { urlOverride: String?, codeOverride: String? ->
+        val targetServerUrl = (urlOverride ?: serverUrl).trim()
+        val targetSessionCode = codeOverride ?: sessionCode
+        connectionSeq += 1
+        val seq = connectionSeq
         wsStatus = "connecting"
         webSocket?.close(1000, "Reconnecting")
         val request = try {
-            Request.Builder().url(serverUrl.trim()).build()
+            Request.Builder().url(targetServerUrl).build()
         } catch (e: Exception) {
             wsStatus = "disconnected"
             logs = logs + LogLine(System.currentTimeMillis(), "Error: Invalid server URL (${e.message})")
@@ -242,10 +256,12 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         val listener = object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 onUi {
+                    if (seq != connectionSeq) return@onUi
+                    webSocket = ws
                     wsStatus = "connected"
                     logs = logs + LogLine(System.currentTimeMillis(), "Connected to server")
-                    if (sessionCode.isNotBlank()) {
-                        val j = JSONObject(); j.put("type", "join_session"); j.put("code", sessionCode)
+                    if (targetSessionCode.isNotBlank()) {
+                        val j = JSONObject(); j.put("type", "join_session"); j.put("code", targetSessionCode)
                         ws.send(j.toString())
                     } else {
                         logs = logs + LogLine(System.currentTimeMillis(), "Enter a session code in Settings")
@@ -257,6 +273,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 try {
                     val json = JSONObject(text)
                     onUi {
+                        if (seq != connectionSeq) return@onUi
                         when (json.optString("type")) {
                             "session_joined" -> {
                                 relayOnline = json.optBoolean("relay_online", false)
@@ -280,14 +297,37 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                     logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
                                 }
                                 if (relayOnline) {
-                                    requestSessions("")
+                                    mainHandler.postDelayed({
+                                        onUi {
+                                            if (seq == connectionSeq && relayOnline) {
+                                                requestSessions("", webSocket)
+                                            }
+                                        }
+                                    }, 600)
+                                    mainHandler.postDelayed({
+                                        onUi {
+                                            if (seq == connectionSeq && relayOnline && sessions.isEmpty()) {
+                                                requestSessions("", webSocket)
+                                            }
+                                        }
+                                    }, 2400)
+                                    mainHandler.postDelayed({
+                                        onUi {
+                                            if (seq == connectionSeq && relayOnline && sessions.isEmpty()) {
+                                                sessionsLoading = false
+                                                sessionsNotice = "No chats received yet. Tap refresh or restart the relay."
+                                            }
+                                        }
+                                    }, 7000)
                                     if (selectedSessionId.isNotBlank() && currentAgent.isNotBlank()) {
-                                        requestSessionDetail(RemoteSession(currentAgent, selectedSessionId, selectedSessionTitle, ""))
+                                        requestSessionDetail(RemoteSession(currentAgent, selectedSessionId, selectedSessionTitle, ""), ws)
                                     }
                                 }
                             }
                             "sessions" -> {
                                 sessions = parseSessions(json.optJSONArray("sessions") ?: JSONArray())
+                                sessionsLoading = false
+                                sessionsNotice = if (sessions.isEmpty()) "No saved Codex/OpenCode chats found." else ""
                                 sessions.firstOrNull { it.id == selectedSessionId }?.let {
                                     selectedSessionTitle = it.title
                                     prefs.edit().putString("SELECTED_SESSION_TITLE", it.title).apply()
@@ -325,9 +365,10 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 } catch (_: Exception) {}
             }
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) { onUi { wsStatus = "disconnected" } }
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) { onUi { if (seq == connectionSeq) wsStatus = "disconnected" } }
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 onUi {
+                    if (seq != connectionSeq) return@onUi
                     wsStatus = "disconnected"
                     logs = logs + LogLine(System.currentTimeMillis(), "Error: ${t.message ?: "Connection failed"}")
                 }
@@ -336,22 +377,17 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         if (request != null) webSocket = OkHttpAgent.client.newWebSocket(request, listener)
     }
 
-    DisposableEffect(serverUrl) {
-        connectWs()
+    DisposableEffect(Unit) {
+        if (initialDeepLink.isBlank()) connectWs(null, null)
         onDispose { webSocket?.close(1000, "Closing") }
     }
 
     DisposableEffect(lifecycleOwner, serverUrl, sessionCode) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && sessionCode.isNotBlank()) {
-                if (wsStatus != "connected") {
-                    connectWs()
-                } else {
-                    requestSessions("")
-                    if (selectedSessionId.isNotBlank() && currentAgent.isNotBlank()) {
-                        requestSessionDetail(RemoteSession(currentAgent, selectedSessionId, selectedSessionTitle, ""))
-                    }
-                }
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                hasPausedOnce = true
+            } else if (event == Lifecycle.Event.ON_RESUME && hasPausedOnce && sessionCode.isNotBlank()) {
+                connectWs(null, null)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -362,6 +398,16 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         val text = visibleTranscript()
         prefs.edit().putString("LAST_TRANSCRIPT", text.takeLast(60000)).apply()
         if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+    }
+
+    LaunchedEffect(relayOnline, showChats, webSocket) {
+        val socket = webSocket
+        if (relayOnline && showChats && socket != null) {
+            delay(600)
+            if (sessions.isEmpty()) requestSessions("", socket)
+            delay(2400)
+            if (sessions.isEmpty()) requestSessions("", socket)
+        }
     }
 
     val sendMsg = {
@@ -387,20 +433,24 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it.getOrElse(1) { "" }, "UTF-8")
                 }
             }
-            if (params.containsKey("code")) sessionCode = params["code"] ?: ""
-            if (params.containsKey("agent")) currentAgent = params["agent"] ?: ""
+            val nextSessionCode = params["code"] ?: sessionCode
+            val nextAgent = params["agent"] ?: currentAgent
+            var nextServerUrl = serverUrl
+            if (params.containsKey("code")) sessionCode = nextSessionCode
+            if (params.containsKey("agent")) currentAgent = nextAgent
             selectedSessionId = ""
             selectedSessionTitle = ""
             if (raw.startsWith("ws") || raw.startsWith("wss")) {
                 val port = if (uri.port > 0) ":${uri.port}" else ""
-                serverUrl = "${uri.scheme}://${uri.host}$port"
+                nextServerUrl = "${uri.scheme}://${uri.host}$port"
+                serverUrl = nextServerUrl
             }
             prefs.edit().putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
                 .putString("CURRENT_AGENT", currentAgent).putString("SELECTED_SESSION_ID", "").putString("SELECTED_SESSION_TITLE", "").apply()
-            connectWs()
+            connectWs(nextServerUrl, nextSessionCode)
         } catch (_: Exception) {
             sessionCode = raw
-            prefs.edit().putString("SESSION_CODE", raw).apply(); connectWs()
+            prefs.edit().putString("SESSION_CODE", raw).apply(); connectWs(null, raw)
         }
     }
 
@@ -461,7 +511,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     TextButton(onClick = {
                         prefs.edit().putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
                             .putString("CURRENT_AGENT", currentAgent).apply()
-                        showSettings = false; connectWs()
+                        showSettings = false; connectWs(null, null)
                     }) { Text("Save", color = Color(0xFF8B5CF6)) }
                 }
             }
@@ -551,7 +601,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
         Spacer(Modifier.height(8.dp))
 
-        if (showChats && sessions.isNotEmpty()) {
+        if (showChats && relayOnline) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp).clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF15161A)).padding(8.dp)
@@ -559,6 +609,16 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 item {
                     Text("Chats", color = Color(0xFF8B5CF6), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(4.dp))
+                }
+                if (sessions.isEmpty()) {
+                    item {
+                        Text(
+                            if (sessionsLoading) "Loading chats..." else sessionsNotice.ifBlank { "No chats loaded yet. Tap refresh." },
+                            color = Color(0xFF9CA3AF),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp)
+                        )
+                    }
                 }
                 items(sessions.take(200)) { session ->
                     val selected = session.id == selectedSessionId

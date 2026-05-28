@@ -21,12 +21,26 @@ const MODEL_KEY = { codex: 'CODEX_MODEL', opencode: 'OPENCODE_MODEL' };
 
 const sessions = new Map();
 
+function ensurePhoneSockets(session) {
+  if (!session.phoneWss) session.phoneWss = new Set();
+  return session.phoneWss;
+}
+
+function sendToPhones(session, obj) {
+  const targets = new Set();
+  if (session?.phoneWs) targets.add(session.phoneWs);
+  for (const phone of ensurePhoneSockets(session)) targets.add(phone);
+  for (const phone of targets) {
+    if (phone?.readyState === 1) send(phone, obj);
+  }
+}
+
 function loadSessions() {
   try {
     if (fs.existsSync(SESSIONS_FILE)) {
       const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
       for (const [code, s] of Object.entries(data)) {
-        sessions.set(code, { ...s, relayWs: null, phoneWs: null, reconnectTimer: null });
+        sessions.set(code, { ...s, relayWs: null, phoneWs: null, phoneWss: new Set(), reconnectTimer: null });
       }
       console.log(`Loaded ${Object.keys(data).length} persisted sessions`);
     }
@@ -162,6 +176,7 @@ wss.on('connection', (ws) => {
       const s = sessions.get(code);
       if (!s || s.state === 'expired') { send(ws, { type: 'error', content: 'Session expired' }); return; }
       s.phoneWs = ws;
+      ensurePhoneSockets(s).add(ws);
       ws._code = code; ws._role = 'phone';
       if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
       const agentModel = {};
@@ -186,7 +201,7 @@ wss.on('connection', (ws) => {
       const s = ws._code ? sessions.get(ws._code) : null;
       if (s && ws._role === 'relay') {
         Object.assign(s.config, msg.config || {});
-        if (s.phoneWs?.readyState === 1) send(s.phoneWs, { type: 'config_updated', config: s.config });
+        sendToPhones(s, { type: 'config_updated', config: s.config });
         send(ws, { type: 'system', content: 'Config updated' });
         saveSessions();
       }
@@ -198,10 +213,10 @@ wss.on('connection', (ws) => {
 
     if (ws._role === 'relay' && msg.clientId) {
       const t = sessions.get(msg.clientId);
-      if (t?.phoneWs?.readyState === 1) {
+      if (t) {
         const forwarded = { ...msg };
         delete forwarded.clientId;
-        send(t.phoneWs, forwarded);
+        sendToPhones(t, forwarded);
       }
       return;
     }
@@ -227,7 +242,7 @@ wss.on('connection', (ws) => {
     // Relay → Phone (stream results)
     if (ws._role === 'relay' && msg.clientId) {
       const t = sessions.get(msg.clientId);
-      if (t?.phoneWs?.readyState === 1) send(t.phoneWs, { type: msg.type, content: msg.content });
+      if (t) sendToPhones(t, { type: msg.type, content: msg.content });
       return;
     }
 
@@ -243,10 +258,11 @@ wss.on('connection', (ws) => {
     if (!s) return;
     if (ws._role === 'relay') {
       s.relayWs = null;
-      send(s.phoneWs, { type: 'status', content: 'Desktop relay offline. Local agents unavailable.' });
+      sendToPhones(s, { type: 'status', content: 'Desktop relay offline. Local agents unavailable.' });
       saveSessions();
     } else if (ws._role === 'phone') {
-      s.phoneWs = null;
+      ensurePhoneSockets(s).delete(ws);
+      if (s.phoneWs === ws) s.phoneWs = null;
     }
   });
 });

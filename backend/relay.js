@@ -184,9 +184,12 @@ function connect() {
     if (msg.type === 'execute') {
       const { agent, prompt, clientId, sessionId } = msg;
       console.log(`\n📩 ${agent}: "${prompt.slice(0, 80)}..."`);
-      await executeAgent(agent, prompt, clientId, sessionId);
+      executeAgent(agent, prompt, clientId, sessionId).catch((err) => {
+        send({ type: 'error', clientId, content: `${agent} failed: ${err.message}` });
+      });
     } else if (msg.type === 'session_list') {
       const sessions = await listLocalSessions(msg.agent);
+      console.log(`  [sessions] ${sessions.length} ${msg.agent || 'all'} -> ${msg.clientId || 'unknown'}`);
       send({ type: 'sessions', clientId: msg.clientId, sessions });
     } else if (msg.type === 'session_detail') {
       try {
