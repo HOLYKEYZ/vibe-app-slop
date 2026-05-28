@@ -326,7 +326,7 @@ function executePtyAgent(agent, prompt, clientId) {
   session.terminal.write(prompt);
   setTimeout(() => {
     try { session.terminal.write('\r'); } catch {}
-  }, 100);
+  }, 250);
 }
 
 function executeAgent(agent, prompt, clientId) {
