@@ -1,8 +1,0 @@
-Agent: Codex (codex)
-Code: PAVdRqmvMk
-URL: wss://agent-hub-backend-wk48.onrender.com?code=PAVdRqmvMk&agent=codex
-
-Agent: OpenCode (opencode)
-Code: PAVdRqmvMk
-URL: wss://agent-hub-backend-wk48.onrender.com?code=PAVdRqmvMk&agent=opencode
-

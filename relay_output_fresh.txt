@@ -463,3 +463,4 @@
 
   [opencode] Code: PAVdRqmvMk  |  URL: wss://agent-hub-backend-wk48.onrender.com?code=PAVdRqmvMk&agent=opencode
 
+❌ Disconnected. Reconnecting in 5s...
