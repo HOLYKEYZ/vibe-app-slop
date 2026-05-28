@@ -1,4 +1,4 @@
-# Agent Hub
+# codex-OC_mobile
 
 Remote control Codex and OpenCode from your phone through a desktop relay.
 
