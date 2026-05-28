@@ -388,10 +388,8 @@ function parseCodexRollout(file, includeEvents = false) {
         if (name === 'shell_command' && args) {
           const command = extractCommandFromArgs(args);
           commands.push({ name, command: command || truncateText(args, 500), time });
-          messages.push({ role: 'tool', text: `command: ${command || truncateText(args, 700)}`, time, type: 'command' });
         } else {
           tools.push({ name, arguments: truncateText(args, 700), time });
-          messages.push({ role: 'tool', text: `${name}: ${truncateText(args, 700)}`, time, type: 'tool' });
         }
         for (const candidate of extractPathsFromText(args)) files.add(candidate);
       } else if (includeEvents && payload.type === 'function_call_output') {
@@ -411,7 +409,6 @@ function parseCodexRollout(file, includeEvents = false) {
       } else if (includeEvents && /tool|exec|browser|file|patch|command/i.test(payload.type || '')) {
         const compact = truncateText(JSON.stringify(payload), 1000);
         tools.push({ name: payload.type || 'event', arguments: compact, time });
-        messages.push({ role: 'tool', text: `${payload.type || 'event'}: ${compact}`, time, type: 'event' });
       }
     }
   }
@@ -485,7 +482,7 @@ async function listOpenCodeSessions() {
 
 function listCodexSessions() {
   const titles = readCodexIndexTitles();
-  return getCodexRollouts(200).map((file) => {
+  return getCodexRollouts(1000).map((file) => {
     try {
       const parsed = parseCodexRollout(file, false);
       const cwd = parsed.meta.cwd || '';
@@ -580,7 +577,7 @@ async function getCodexSessionDetail(sessionId) {
     project: parsed.meta.cwd ? path.basename(parsed.meta.cwd) : '',
     path: file,
     updatedAt: parsed.updatedAt,
-    messages: parsed.messages.slice(-160),
+    messages: parsed.messages.slice(-300),
     files: parsed.files,
     commands: parsed.commands.slice(-50),
     tools: parsed.tools.slice(-50),
@@ -673,8 +670,11 @@ async function sendCodexPrompt(prompt, clientId, sessionId) {
   const cmd = getCmd(a);
   if (!commandExists(cmd)) throw new Error('Codex CLI not found on PATH.');
   const args = codexExecArgs(prompt, sessionId);
-  console.log(`  [codex-json] $ ${cmd} ${args.join(' ')}`);
+  console.log(`  [codex-json] resume ${sessionId}`);
+  const before = await getCodexSessionDetail(sessionId).catch(() => null);
+  const beforeCount = before?.messages?.length || 0;
   send({ type: 'status', clientId, content: `Sending to Codex chat ${sessionId}` });
+  send({ type: 'status', clientId, content: 'Codex is running via resume; it will not type into the visible desktop composer.' });
 
   await new Promise((resolve, reject) => {
     let child;
@@ -688,6 +688,8 @@ async function sendCodexPrompt(prompt, clientId, sessionId) {
     let buffer = '';
     let fullText = '';
     let done = false;
+    let sawEvent = false;
+    let firstEventTimer = null;
 
     function consume(data) {
       const text = data.toString();
@@ -699,6 +701,11 @@ async function sendCodexPrompt(prompt, clientId, sessionId) {
         if (!line.trim()) continue;
         const ev = readJsonLine(line);
         if (!ev) continue;
+        sawEvent = true;
+        if (firstEventTimer) {
+          clearTimeout(firstEventTimer);
+          firstEventTimer = null;
+        }
         const formatted = formatCodexJsonEvent(ev);
         if (!formatted) continue;
         if (formatted.kind === 'stream') send({ type: 'replace_stream', clientId, content: formatted.text });
@@ -716,16 +723,26 @@ async function sendCodexPrompt(prompt, clientId, sessionId) {
       else reject(new Error(stripTerminalNoise(fullText).slice(-1200) || `Codex exited ${code}`));
     });
 
+    firstEventTimer = setTimeout(() => {
+      if (done || sawEvent) return;
+      done = true;
+      try { child.kill(); } catch {}
+      reject(new Error('Codex did not emit any resume events in 45 seconds. This usually means that chat is currently active/locked in Codex Desktop; pick an inactive chat or start a dedicated phone chat.'));
+    }, 45 * 1000);
+
     setTimeout(() => {
       if (done) return;
       done = true;
       try { child.kill(); } catch {}
-      reject(new Error('Codex timed out after 10 minutes.'));
-    }, 10 * 60 * 1000);
+      reject(new Error('Codex timed out after 3 minutes.'));
+    }, 3 * 60 * 1000);
   });
 
   const detail = await getCodexSessionDetail(sessionId).catch(() => null);
   if (detail) send({ type: 'session_detail', clientId, detail });
+  if (detail && (detail.messages?.length || 0) <= beforeCount) {
+    send({ type: 'status', clientId, content: 'Codex finished but no new assistant message appeared in the session log.' });
+  }
   send({ type: 'done', clientId, content: '' });
 }
 

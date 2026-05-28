@@ -1,6 +1,8 @@
 package com.example.agenthub
 
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.app.Activity
 import android.os.Bundle
@@ -36,6 +38,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
@@ -101,10 +105,17 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     }
 
     var input by remember { mutableStateOf("") }
-    var logs by remember { mutableStateOf(listOf<LogLine>()) }
+    var logs by remember {
+        mutableStateOf(
+            prefs.getString("LAST_TRANSCRIPT", "")?.takeIf { it.isNotBlank() }
+                ?.let { listOf(LogLine(System.currentTimeMillis(), it, "replace")) }
+                ?: emptyList()
+        )
+    }
     var wsStatus by remember { mutableStateOf("connecting") }
     var webSocket by remember { mutableStateOf<WebSocket?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    var showChats by remember { mutableStateOf(prefs.getBoolean("SHOW_CHATS", true)) }
     var showQrScanner by remember { mutableStateOf(false) }
     var showModelPicker by remember { mutableStateOf(false) }
     var relayOnline by remember { mutableStateOf(false) }
@@ -179,6 +190,42 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         }
     }
 
+    fun consolidatedLogs(): List<LogLine> {
+        val consolidated = mutableListOf<LogLine>()
+        for (log in logs) {
+            if (log.type == "replace" && consolidated.isNotEmpty() && consolidated.last().type == "replace") {
+                consolidated[consolidated.size - 1] = log
+            } else {
+                consolidated.add(log)
+            }
+        }
+        return consolidated
+    }
+
+    fun visibleTranscript(): String {
+        return consolidatedLogs().map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n").takeLast(60000)
+    }
+
+    fun copyVisibleTranscript() {
+        val text = visibleTranscript()
+        if (text.isBlank()) return
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Agent Hub transcript", text))
+        logs = logs + LogLine(System.currentTimeMillis(), "Copied visible transcript")
+    }
+
+    fun compactChatText(text: String): String {
+        val cleaned = stripAnsi(text).trim()
+        val looksLikeTerminalPaste = cleaned.contains("Windows PowerShell") ||
+            cleaned.contains("node relay.js") ||
+            cleaned.contains("════════") ||
+            cleaned.contains("Relay session:")
+        if (looksLikeTerminalPaste && cleaned.length > 1200) {
+            return "[long terminal paste hidden in chat view; use the Codex desktop chat for the original paste]"
+        }
+        return cleaned
+    }
+
     val listState = rememberLazyListState()
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -233,7 +280,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                     logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
                                 }
                                 if (relayOnline) {
-                                    requestSessions(currentAgent)
+                                    requestSessions("")
                                     if (selectedSessionId.isNotBlank() && currentAgent.isNotBlank()) {
                                         requestSessionDetail(RemoteSession(currentAgent, selectedSessionId, selectedSessionTitle, ""))
                                     }
@@ -250,25 +297,15 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 val detail = json.optJSONObject("detail")
                                 val messages = detail?.optJSONArray("messages")
                                 if (messages != null) {
-                                    val history = (0 until messages.length()).joinToString("\n\n") { i ->
+                                    val chatLogs = (0 until messages.length()).mapNotNull { i ->
                                         val m = messages.optJSONObject(i)
                                         val role = m?.optString("role") ?: "message"
-                                        val type = m?.optString("type") ?: "message"
-                                        val text = stripAnsi(m?.optString("text") ?: "")
-                                        if (type == "command") "command: $text" else "$role: $text"
-                                    }.trim()
-                                    val files = detail.optJSONArray("files")
-                                    val fileText = if (files != null && files.length() > 0) {
-                                        (0 until minOf(files.length(), 12)).joinToString("\n", prefix = "\n\nfiles:\n") { i -> "- ${files.optString(i)}" }
-                                    } else ""
-                                    val commands = detail.optJSONArray("commands")
-                                    val commandText = if (commands != null && commands.length() > 0) {
-                                        (0 until minOf(commands.length(), 8)).joinToString("\n", prefix = "\n\ncommands:\n") { i ->
-                                            "- ${stripAnsi(commands.optJSONObject(i)?.optString("command") ?: "")}"
-                                        }
-                                    } else ""
-                                    val text = (history + fileText + commandText).trim()
-                                    if (text.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), text, "replace")
+                                        val text = compactChatText(m?.optString("text") ?: "")
+                                        if ((role == "user" || role == "assistant") && text.isNotBlank()) {
+                                            LogLine(System.currentTimeMillis() + i, text, role)
+                                        } else null
+                                    }
+                                    if (chatLogs.isNotEmpty()) logs = chatLogs
                                 }
                             }
                             "config_updated" -> {
@@ -278,9 +315,9 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                     if (cfg.has(modelKey)) currentModel = cfg.getString(modelKey)
                                 }
                             }
-                            "stream" -> logs = logs + LogLine(System.currentTimeMillis(), stripAnsi(json.optString("content")))
-                            "replace_stream" -> logs = logs + LogLine(System.currentTimeMillis(), stripAnsi(json.optString("content")), "replace")
-                            "status", "system" -> logs = logs + LogLine(System.currentTimeMillis(), json.optString("content"))
+                            "stream" -> logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "assistant")
+                            "replace_stream" -> logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "assistant")
+                            "status", "system" -> logs = logs + LogLine(System.currentTimeMillis(), json.optString("content"), "status")
                             "done" -> { val c = json.optString("content"); if (c.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), c) }
                             "error" -> logs = logs + LogLine(System.currentTimeMillis(), "Error: ${json.optString("content")}")
                         }
@@ -306,22 +343,33 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
     DisposableEffect(lifecycleOwner, serverUrl, sessionCode) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && sessionCode.isNotBlank() && wsStatus != "connected") {
-                connectWs()
+            if (event == Lifecycle.Event.ON_RESUME && sessionCode.isNotBlank()) {
+                if (wsStatus != "connected") {
+                    connectWs()
+                } else {
+                    requestSessions("")
+                    if (selectedSessionId.isNotBlank() && currentAgent.isNotBlank()) {
+                        requestSessionDetail(RemoteSession(currentAgent, selectedSessionId, selectedSessionTitle, ""))
+                    }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(logs.size) { if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1) }
+    LaunchedEffect(logs) {
+        val text = visibleTranscript()
+        prefs.edit().putString("LAST_TRANSCRIPT", text.takeLast(60000)).apply()
+        if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+    }
 
     val sendMsg = {
         if (input.isNotBlank() && wsStatus == "connected" && currentAgent.isNotBlank()) {
             if (currentAgent == "codex" && selectedSessionId.isBlank()) {
                 logs = logs + LogLine(System.currentTimeMillis(), "Pick a Codex chat first. This prevents starting a new terminal session by accident.")
             } else {
-            logs = logs + LogLine(System.currentTimeMillis(), "> $input")
+            logs = logs + LogLine(System.currentTimeMillis(), input, "user")
             val j = JSONObject(); j.put("agent", currentAgent); j.put("prompt", input)
             if (selectedSessionId.isNotBlank()) j.put("sessionId", selectedSessionId)
             webSocket?.send(j.toString()); input = ""
@@ -473,6 +521,15 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     Text(currentModel, color = Color(0xFF8B5CF6), fontSize = 10.sp,
                         modifier = Modifier.clickable { showModelPicker = true }.padding(end = 8.dp, top = 4.dp))
                 }
+                if (isConnected && relayOnline) {
+                    IconButton(onClick = {
+                        showChats = !showChats
+                        prefs.edit().putBoolean("SHOW_CHATS", showChats).apply()
+                        if (showChats) requestSessions("")
+                    }) {
+                        Icon(Icons.Default.Chat, contentDescription = "Chats", tint = Color(0xFF888888))
+                    }
+                }
                 if (!isConnected) {
                     Button(onClick = { showSettings = true },
                         modifier = Modifier.height(36.dp).clip(RoundedCornerShape(18.dp)),
@@ -482,7 +539,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     Spacer(Modifier.width(8.dp))
                 }
                 if (isConnected && relayOnline) {
-                    IconButton(onClick = { requestSessions(currentAgent) }) {
+                    IconButton(onClick = { requestSessions("") }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh sessions", tint = Color(0xFF888888))
                     }
                 }
@@ -494,7 +551,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
         Spacer(Modifier.height(8.dp))
 
-        if (sessions.isNotEmpty()) {
+        if (showChats && sessions.isNotEmpty()) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp).clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFF15161A)).padding(8.dp)
@@ -503,7 +560,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     Text("Chats", color = Color(0xFF8B5CF6), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(4.dp))
                 }
-                items(sessions.take(40)) { session ->
+                items(sessions.take(200)) { session ->
                     val selected = session.id == selectedSessionId
                     Row(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
@@ -512,8 +569,9 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 currentAgent = session.agent
                                 selectedSessionId = session.id
                                 selectedSessionTitle = session.title
+                                logs = emptyList()
                                 prefs.edit().putString("CURRENT_AGENT", session.agent).putString("SELECTED_SESSION_ID", session.id)
-                                    .putString("SELECTED_SESSION_TITLE", session.title).apply()
+                                    .putString("SELECTED_SESSION_TITLE", session.title).putString("LAST_TRANSCRIPT", "").apply()
                                 requestSessionDetail(session)
                             }
                             .padding(horizontal = 8.dp, vertical = 6.dp),
@@ -535,6 +593,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         // Chat area
         Box(modifier = Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(16.dp))
             .background(Color(0xFF1E1E24)).padding(12.dp)) {
+            if (logs.isNotEmpty()) {
+                IconButton(
+                    onClick = { copyVisibleTranscript() },
+                    modifier = Modifier.align(Alignment.TopEnd).size(36.dp)
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy transcript", tint = Color(0xFF888888))
+                }
+            }
             if (!isConnected) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -558,17 +624,40 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 }
             } else {
                 LazyColumn(state = listState) {
-                    val consolidated = mutableListOf<LogLine>()
-                    for (log in logs) {
-                        if (log.type == "replace" && consolidated.isNotEmpty() && consolidated.last().type == "replace") {
-                            consolidated[consolidated.size - 1] = log
-                        } else { consolidated.add(log) }
-                    }
-                    items(consolidated) { log ->
-                        val color = when { log.text.startsWith("> ") -> Color.White; log.text.startsWith("Error") -> Color(0xFFEF4444); else -> Color(0xFFA7F3D0) }
+                    items(consolidatedLogs()) { log ->
                         if (log.text.isNotBlank()) {
-                            Text(log.text, color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                                modifier = Modifier.padding(vertical = 1.dp))
+                            val isUser = log.type == "user"
+                            val isStatus = log.type == "status" || log.text.startsWith("Error")
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(
+                                    start = if (isUser) 32.dp else 0.dp,
+                                    top = 3.dp,
+                                    end = if (isUser) 0.dp else 32.dp,
+                                    bottom = 3.dp
+                                ),
+                                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                            ) {
+                                Surface(
+                                    color = when {
+                                        isStatus -> Color.Transparent
+                                        isUser -> Color(0xFF3B2F79)
+                                        else -> Color(0xFF15161A)
+                                    },
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text(
+                                        log.text,
+                                        color = when {
+                                            log.text.startsWith("Error") -> Color(0xFFEF4444)
+                                            isStatus -> Color(0xFF8F96A3)
+                                            else -> Color.White
+                                        },
+                                        fontFamily = if (isStatus) FontFamily.Monospace else FontFamily.Default,
+                                        fontSize = if (isStatus) 11.sp else 13.sp,
+                                        modifier = Modifier.padding(horizontal = if (isStatus) 0.dp else 10.dp, vertical = if (isStatus) 2.dp else 8.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
