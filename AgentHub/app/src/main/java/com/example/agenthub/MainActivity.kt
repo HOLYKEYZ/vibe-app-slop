@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.RecognizerIntent
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -59,19 +61,27 @@ data class RemoteSession(val agent: String, val id: String, val title: String, v
 val AGENT_NAMES = mapOf("codex" to "Codex", "opencode" to "OpenCode", "system" to "system")
 
 class MainActivity : ComponentActivity() {
+    private val deepLinkState = mutableStateOf("")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val intentData = intent?.data?.toString() ?: ""
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        deepLinkState.value = intent?.data?.toString() ?: ""
         setContent {
             AgentHubTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0C)) {
-                    AgentHubScreen(initialDeepLink = intentData)
+                    AgentHubScreen(initialDeepLink = deepLinkState.value)
                 }
             }
         }
     }
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        deepLinkState.value = intent.data?.toString() ?: ""
+    }
 }
 
 @Composable
@@ -98,8 +108,19 @@ object OkHttpAgent {
 @Composable
 fun AgentHubScreen(initialDeepLink: String = "") {
     val context = LocalContext.current
+    val rootView = LocalView.current
     val prefs = remember { context.getSharedPreferences("AgentHubPrefs", Context.MODE_PRIVATE) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    DisposableEffect(rootView, context) {
+        rootView.keepScreenOn = true
+        val window = (context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            rootView.keepScreenOn = false
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
 
     fun onUi(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post { block() }
