@@ -30,7 +30,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -73,6 +72,16 @@ fun CameraPreview(onScan: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val analyzer = remember { BarcodeScanning.getClient() }
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val scanned = remember { AtomicBoolean(false) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try { analyzer.close() } catch (_: Exception) {}
+            try { ProcessCameraProvider.getInstance(context).get().unbindAll() } catch (_: Exception) {}
+            cameraExecutor.shutdown()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
@@ -88,9 +97,13 @@ fun CameraPreview(onScan: (String) -> Unit) {
                             .setBackpressureStrategy(STRATEGY_KEEP_ONLY_LATEST)
                             .build()
 
-                        imageAnalysis.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                             val closed = AtomicBoolean(false)
                             val safeClose = { if (!closed.getAndSet(true)) imageProxy.close() }
+                            if (scanned.get()) {
+                                safeClose()
+                                return@setAnalyzer
+                            }
 
                             val mediaImage = imageProxy.image
                             if (mediaImage != null) {
@@ -99,8 +112,9 @@ fun CameraPreview(onScan: (String) -> Unit) {
                                     .addOnSuccessListener { barcodes ->
                                         for (barcode in barcodes) {
                                             barcode.rawValue?.let { value ->
+                                                if (scanned.getAndSet(true)) return@addOnSuccessListener
                                                 safeClose()
-                                                onScan(value)
+                                                ContextCompat.getMainExecutor(ctx).execute { onScan(value) }
                                                 return@addOnSuccessListener
                                             }
                                         }

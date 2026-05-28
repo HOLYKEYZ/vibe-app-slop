@@ -11,18 +11,13 @@ const CHARSET = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
 const DEFAULTS = {
   codex:    process.env.CODEX_MODEL      || 'gpt-5.5',
   opencode: process.env.OPENCODE_MODEL   || 'gpt-5.5',
-  windsurf: process.env.WINDSURF_MODEL   || 'gpt-4o',
-  kiro:     process.env.KIRO_MODEL       || 'anthropic.claude-3-5-sonnet-20241022-v2:0',
-  kiroRegion: process.env.KIRO_REGION    || 'us-east-1',
 };
 
 const AGENT_MODELS = {
   codex:    ['gpt-4o', 'gpt-4.1', 'gpt-5', 'gpt-5.5'],
   opencode: ['gpt-4o', 'gpt-4.1', 'gpt-5', 'gpt-5.5', 'o3-mini', 'gpt-4.1-nano'],
-  windsurf: ['gpt-4o', 'gpt-4.1'],
-  kiro:     ['anthropic.claude-3-5-sonnet-20241022-v2:0', 'anthropic.claude-3-opus-20240229', 'anthropic.claude-3-haiku-20240307', 'anthropic.claude-3-5-haiku-20241022'],
 };
-const MODEL_KEY = { codex: 'CODEX_MODEL', opencode: 'OPENCODE_MODEL', windsurf: 'WINDSURF_MODEL', kiro: 'KIRO_MODEL' };
+const MODEL_KEY = { codex: 'CODEX_MODEL', opencode: 'OPENCODE_MODEL' };
 
 const sessions = new Map();
 
@@ -111,7 +106,7 @@ const server = http.createServer((req, res) => {
     <div class="card">
       <div class="icon">🤖</div>
       <h1>Agent Hub</h1>
-      <p>Control Codex, OpenCode, Windsurf &amp; Kiro from your phone</p>
+      <p>Control Codex and OpenCode from your phone</p>
       ${hasApk ? `<a href="/apk" class="btn">⬇ Install APK (${(fs.statSync(apkPath).size / 1024 / 1024).toFixed(1)} MB)</a>` : `<p style="color:#e88">APK not on this server.</p><p class="hint">Build locally with <code>cd AgentHub && ./gradlew assembleDebug</code> then run <code>node serve-apk.js</code> on your LAN.</p>`}
       <p class="hint">After installing, open the app and scan the QR code from your laptop's relay terminal.</p>
     </div></body></html>`);
@@ -204,8 +199,19 @@ wss.on('connection', (ws) => {
     if (ws._role === 'relay' && msg.clientId) {
       const t = sessions.get(msg.clientId);
       if (t?.phoneWs?.readyState === 1) {
-        send(t.phoneWs, { type: msg.type, content: msg.content || '' });
+        const forwarded = { ...msg };
+        delete forwarded.clientId;
+        send(t.phoneWs, forwarded);
       }
+      return;
+    }
+
+    if (ws._role === 'phone' && ['session_list', 'session_detail'].includes(msg.type)) {
+      if (!getRelayOnline(s)) {
+        send(ws, { type: 'error', content: 'Desktop relay offline. Wake the laptop and restart the relay.' });
+        return;
+      }
+      send(s.relayWs, { ...msg, clientId: s.code });
       return;
     }
 
@@ -214,7 +220,7 @@ wss.on('connection', (ws) => {
 
     // Phone → Relay
     if (ws._role === 'phone' && getRelayOnline(s)) {
-      send(s.relayWs, { type: 'execute', agent, prompt, clientId: s.code });
+      send(s.relayWs, { type: 'execute', agent, prompt, sessionId: msg.sessionId || '', clientId: s.code });
       return;
     }
 

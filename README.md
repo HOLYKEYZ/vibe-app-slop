@@ -1,24 +1,21 @@
 # Agent Hub
 
-Remote control 4 AI coding agents (Codex, OpenCode, Windsurf, Kiro) from your phone.
+Remote control Codex and OpenCode from your phone through a desktop relay.
 
-```
-Phone ──wss──► Render Server ←──wss── Laptop (relay + CLI agents)
-                    │
-                    └──► OpenAI / Bedrock / etc (cloud fallback)
+```text
+Phone --wss--> Relay Server <--wss-- Laptop relay
+                                      |-- Codex local session
+                                      `-- OpenCode local server
 ```
 
-- **Relay mode**: laptop runs agents locally (full CLI access, tools, approvals)
-- **Cloud mode**: laptop offline — server calls APIs directly with stored keys
-- **QR pairing**: scan a code from the laptop terminal, no config needed
+- Relay-only execution: the server never calls model APIs.
+- QR pairing: scan the laptop relay code from the Android app.
+- Session-aware control: list local Codex/OpenCode chats and send prompts into a selected session.
+- Offline behavior: if the laptop relay is offline, the phone receives an offline error.
 
 ## Quick Start
 
 ### 1. Deploy the server
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
-
-Or manually:
 
 ```bash
 git clone https://github.com/HOLYKEYZ/vibe-app-slop.git
@@ -27,21 +24,18 @@ npm install
 node server.js
 ```
 
-Deploy `backend/` on Render as a Node.js web service (or any cloud provider). Port `3001`.
+Deploy `backend/` on Render as a Node.js web service. Port `3001`.
 
 ### 2. Install Android app
-
-Build from source:
 
 ```bash
 cd AgentHub
 ./gradlew assembleDebug
-# APK at app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Or download from Releases.
+The APK is written to `AgentHub/app/build/outputs/apk/debug/app-debug.apk`.
 
-### 3. Start the relay (laptop)
+### 3. Start the laptop relay
 
 ```bash
 cd backend
@@ -49,43 +43,24 @@ npm install
 SERVER_URL=wss://your-server.onrender.com node relay.js
 ```
 
-The relay auto-discovers API keys from local CLI configs (`~/.codex/config.toml`, `~/.local/share/opencode/auth.json`, etc.) and prints a QR code.
+The relay checks for signed-in local Codex/OpenCode installs and prints a QR code. Secrets stay on the laptop.
 
 ### 4. Connect your phone
 
-- Open the Agent Hub app → tap **Scan QR** → scan the code from your terminal
-- Or tap **Enter session code** → paste the code shown in the terminal
-
-### 5. Chat
-
-Pick an agent, type a prompt. When your laptop is on, agents run locally with full tool access. When it's off, the server falls back to cloud APIs.
+Open Agent Hub, scan the QR code, pick a visible chat, and send a prompt.
 
 ## Agents
 
-| Agent | Session | Cloud API |
-|-------|---------|-----------|
-| Codex | OpenAI key or `access_token` | `api.openai.com` |
-| OpenCode | Provider key (OpenAI, OpenRouter, Groq, Google, NVIDIA) | Multi-provider |
-| Windsurf | Codeium token | `server.codeium.com` |
-| Kiro | AWS credentials (JSON or `key:secret:region`) | Bedrock `converseStream` |
+| Agent | How it is driven |
+|-------|------------------|
+| Codex | Local Codex CLI session or `codex resume <session>` |
+| OpenCode | Local `opencode serve` HTTP API on `127.0.0.1:4096` |
 
-Models are configurable per-agent via the app settings or environment variables (`CODEX_MODEL`, `OPENCODE_MODEL`, etc.).
-
-## Settings Reference
+## Environment
 
 | Env | Default | Description |
 |-----|---------|-------------|
-| `PORT` | `3001` | Server port |
-| `CODEX_MODEL` | `gpt-5.5` | Default Codex model |
-| `OPENCODE_MODEL` | `gpt-5.5` | Default OpenCode model |
-| `WINDSURF_MODEL` | `gpt-4o` | Default Windsurf model |
-| `KIRO_MODEL` | `anthropic.claude-3-5-sonnet-20241022-v2:0` | Default Kiro/Bedrock model |
-| `KIRO_REGION` | `us-east-1` | AWS region for Bedrock |
-
-## Pairing Flow
-
-1. `relay.js` generates a random code, sends API keys to the server, prints QR
-2. Phone scans QR → connects to server with the code
-3. Server links phone ↔ relay; stores keys for cloud fallback
-4. Phone sends prompts → server routes to relay (or cloud if relay offline)
-5. Session persists 5 minutes after relay disconnects, then expires
+| `PORT` | `3001` | Relay server port |
+| `SERVER_URL` | `ws://localhost:3001` | Relay server URL used by `relay.js` |
+| `AGENTHUB_CWD` | repo root | Working directory for local agents |
+| `OPENCODE_PORT` | `4096` | Local OpenCode server port |

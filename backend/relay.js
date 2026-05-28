@@ -13,16 +13,13 @@ const isWin = os.platform() === 'win32';
 
 const AGENTS = [
   { id: 'codex',    name: 'Codex',    modelKey: 'CODEX_MODEL',    cmd: process.env.CODEX_PATH || 'codex', args: p => ['exec', '--dangerously-bypass-approvals-and-sandbox', p], localPromptCli: true },
-  { id: 'opencode', name: 'OpenCode', modelKey: 'OPENCODE_MODEL', cmd: null,                         args: p => ['run', '--dangerously-skip-permissions', '--format', 'json', p], localPromptCli: false },
-  { id: 'windsurf', name: 'Windsurf', modelKey: 'WINDSURF_MODEL', cmd: null,                         args: p => [p], localPromptCli: false },
-  { id: 'kiro',     name: 'Kiro',     modelKey: 'KIRO_MODEL',     cmd: null,                         args: p => [p], localPromptCli: false },
+  { id: 'opencode', name: 'OpenCode', modelKey: 'OPENCODE_MODEL', cmd: null, args: p => ['run', '--dangerously-skip-permissions', '--format', 'json', p], localPromptCli: true, serverBacked: true },
 ];
 
 const PTY_AGENT_ARGS = {
-  codex: (prompt) => ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', prompt],
-  opencode: (prompt) => ['--prompt', prompt],
-  windsurf: (prompt) => [prompt],
-  kiro: (prompt) => [prompt],
+  codex: (prompt, sessionId) => sessionId
+    ? ['resume', sessionId, prompt, '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen']
+    : ['--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen', prompt],
 };
 
 function quoteCmdArg(value) {
@@ -124,28 +121,8 @@ function readOpenCodeConfig() {
   } catch { return {}; }
 }
 
-function readWindsurfConfig() {
-  try {
-    const configPath = path.join(os.homedir(), '.codeium', 'windsurf.json');
-    if (!fs.existsSync(configPath)) return {};
-    JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    return {};
-  } catch { return {}; }
-}
-
-function readKiroConfig() {
-  try {
-    const configPath = path.join(os.homedir(), '.kiro', 'config.json');
-    if (!fs.existsSync(configPath)) return {};
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    const cfg = {};
-    if (raw.model) cfg.KIRO_MODEL = raw.model;
-    return cfg;
-  } catch { return {}; }
-}
-
 function readLocalConfig() {
-  const cfg = { ...readCodexConfig(), ...readOpenCodeConfig(), ...readWindsurfConfig(), ...readKiroConfig() };
+  const cfg = { ...readCodexConfig(), ...readOpenCodeConfig() };
   cfg.LOCAL_AGENTS = getAvailableAgents().map(a => a.id);
   return cfg;
 }
@@ -158,7 +135,10 @@ function getAvailableAgents() {
     const cmd = getCmd(a);
     if (!commandExists(cmd)) return false;
     if (a.id === 'codex') return fs.existsSync(path.join(os.homedir(), '.codex', 'auth.json'));
-    if (a.id === 'opencode') return fs.existsSync(path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json'));
+    if (a.id === 'opencode') {
+      const dataDir = path.join(os.homedir(), '.local', 'share', 'opencode');
+      return fs.existsSync(path.join(dataDir, 'auth.json')) || fs.existsSync(path.join(dataDir, 'opencode.db'));
+    }
     return false;
   });
 }
@@ -190,9 +170,20 @@ function connect() {
     }
 
     if (msg.type === 'execute') {
-      const { agent, prompt, clientId } = msg;
+      const { agent, prompt, clientId, sessionId } = msg;
       console.log(`\n📩 ${agent}: "${prompt.slice(0, 80)}..."`);
-      await executeAgent(agent, prompt, clientId);
+      await executeAgent(agent, prompt, clientId, sessionId);
+    } else if (msg.type === 'session_list') {
+      const sessions = await listLocalSessions(msg.agent);
+      send({ type: 'sessions', clientId: msg.clientId, sessions });
+    } else if (msg.type === 'session_detail') {
+      try {
+        if (msg.agent !== 'opencode') throw new Error('Detailed transcript view is currently available for OpenCode sessions.');
+        const detail = await getOpenCodeSessionDetail(msg.sessionId);
+        send({ type: 'session_detail', clientId: msg.clientId, detail });
+      } catch (err) {
+        send({ type: 'error', clientId: msg.clientId, content: err.message });
+      }
     } else if (msg.type === 'pong') {
       return;
     } else if (msg.type === 'system' || msg.type === 'phone_connected') {
@@ -220,6 +211,200 @@ function send(obj) {
   if (ws?.readyState === 1) ws.send(JSON.stringify(obj));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const OPENCODE_PORT = Number(process.env.OPENCODE_PORT || 4096);
+const OPENCODE_BASE_URL = process.env.OPENCODE_BASE_URL || `http://127.0.0.1:${OPENCODE_PORT}`;
+let opencodeServerProcess = null;
+
+async function requestJson(url, init = {}) {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(init.headers || {}),
+    },
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (res.status === 204) return null;
+  const text = await res.text();
+  if (!text.trim()) return null;
+  return JSON.parse(text);
+}
+
+async function isOpenCodeServerRunning() {
+  try {
+    const health = await requestJson(`${OPENCODE_BASE_URL}/global/health`);
+    return !!health;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureOpenCodeServer() {
+  if (await isOpenCodeServerRunning()) return;
+  const opencode = AGENTS.find((a) => a.id === 'opencode');
+  const cmd = opencode ? getCmd(opencode) : null;
+  if (!cmd || !commandExists(cmd)) throw new Error('OpenCode CLI not found.');
+
+  opencodeServerProcess = spawn(cmd, ['serve', '--hostname', '127.0.0.1', '--port', String(OPENCODE_PORT), '--log-level', 'ERROR'], {
+    stdio: ['ignore', 'ignore', 'ignore'],
+    cwd: WORKSPACE_CWD,
+    env: { ...process.env },
+    windowsHide: true,
+  });
+
+  for (let i = 0; i < 30; i++) {
+    if (await isOpenCodeServerRunning()) return;
+    await sleep(500);
+  }
+  throw new Error(`OpenCode server did not start on ${OPENCODE_BASE_URL}.`);
+}
+
+function responseItems(json) {
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json?.value)) return json.value;
+  if (Array.isArray(json?.data)) return json.data;
+  if (Array.isArray(json?.items)) return json.items;
+  return [];
+}
+
+function toOpenCodeSession(item) {
+  return {
+    agent: 'opencode',
+    id: item.id,
+    title: item.title || item.slug || item.id,
+    subtitle: item.directory || item.path || 'OpenCode',
+    directory: item.directory || '',
+    updatedAt: item.time?.updated || item.time_updated || 0,
+    createdAt: item.time?.created || item.time_created || 0,
+    status: '',
+    summary: item.summary || null,
+  };
+}
+
+async function listOpenCodeSessions() {
+  try {
+    await ensureOpenCodeServer();
+    const json = await requestJson(`${OPENCODE_BASE_URL}/session?limit=100`);
+    return responseItems(json).map(toOpenCodeSession).filter((s) => s.id);
+  } catch (err) {
+    return [{ agent: 'opencode', id: '', title: `OpenCode unavailable: ${err.message}`, subtitle: '', updatedAt: 0, error: true }];
+  }
+}
+
+function listCodexSessions() {
+  const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
+  if (!fs.existsSync(indexPath)) return [];
+  const lines = fs.readFileSync(indexPath, 'utf-8').split(/\r?\n/).filter(Boolean).slice(-100);
+  return lines.map((line) => {
+    try {
+      const item = JSON.parse(line);
+      return {
+        agent: 'codex',
+        id: item.id,
+        title: item.thread_name || item.id,
+        subtitle: 'Codex',
+        updatedAt: item.updated_at ? Date.parse(item.updated_at) : 0,
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean).reverse();
+}
+
+async function listLocalSessions(agent) {
+  const codexSessions = agent && agent !== 'codex' ? [] : listCodexSessions();
+  const opencodeSessions = agent && agent !== 'opencode' ? [] : await listOpenCodeSessions();
+  return [...codexSessions, ...opencodeSessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+function formatOpenCodePart(part) {
+  if (!part) return '';
+  if (part.type === 'text') return part.text || '';
+  if (part.type === 'tool') {
+    const status = part.state?.status || '';
+    const title = part.state?.title || part.tool || 'tool';
+    const input = part.state?.input ? `\ninput: ${JSON.stringify(part.state.input)}` : '';
+    const output = part.state?.output ? `\noutput: ${String(part.state.output).slice(0, 4000)}` : '';
+    return `[tool:${title}${status ? ` ${status}` : ''}]${input}${output}`;
+  }
+  if (part.type === 'file') return `[file:${part.filename || part.url || 'attachment'}]`;
+  return `[${part.type || 'part'}]`;
+}
+
+function formatOpenCodeMessage(message) {
+  const info = message.info || message;
+  const role = info.role || message.role || 'message';
+  const parts = message.parts || message.content || [];
+  const text = Array.isArray(parts) ? parts.map(formatOpenCodePart).filter(Boolean).join('\n') : '';
+  return {
+    id: info.id || message.id || '',
+    role,
+    text,
+    time: info.time || message.time || null,
+  };
+}
+
+async function getOpenCodeSessionDetail(sessionId) {
+  await ensureOpenCodeServer();
+  const [messagesJson, diffJson, todoJson] = await Promise.all([
+    requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/message?limit=100`).catch((err) => ({ error: err.message })),
+    requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/diff`).catch(() => []),
+    requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/todo`).catch(() => []),
+  ]);
+  return {
+    agent: 'opencode',
+    sessionId,
+    messages: responseItems(messagesJson).map(formatOpenCodeMessage),
+    diff: responseItems(diffJson),
+    todo: responseItems(todoJson),
+  };
+}
+
+async function createOpenCodeSession() {
+  await ensureOpenCodeServer();
+  const json = await requestJson(`${OPENCODE_BASE_URL}/session`, {
+    method: 'POST',
+    body: '{}',
+  });
+  return json?.value || json?.data || json;
+}
+
+async function sendOpenCodePrompt(prompt, clientId, sessionId) {
+  await ensureOpenCodeServer();
+  let target = sessionId;
+  if (!target) {
+    const created = await createOpenCodeSession();
+    target = created?.id;
+  }
+  if (!target) throw new Error('OpenCode session not found.');
+
+  send({ type: 'status', clientId, content: `Sending to OpenCode session ${target}` });
+  await requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(target)}/prompt_async`, {
+    method: 'POST',
+    body: JSON.stringify({ parts: [{ type: 'text', text: prompt }] }),
+  });
+  send({ type: 'status', clientId, content: `OpenCode accepted prompt for ${target}` });
+
+  for (let i = 0; i < 30; i++) {
+    await sleep(2000);
+    const detail = await getOpenCodeSessionDetail(target).catch(() => null);
+    if (detail?.messages?.length) {
+      const latest = detail.messages.slice(-6).map((m) => `${m.role}: ${m.text}`).join('\n\n');
+      send({ type: 'replace_stream', clientId, content: latest });
+    }
+    const statusJson = await requestJson(`${OPENCODE_BASE_URL}/session/status`).catch(() => null);
+    const statuses = statusJson?.value || statusJson?.data || statusJson || {};
+    const current = statuses[target];
+    if (!current || current.status === 'idle' || current === 'idle') break;
+  }
+  send({ type: 'done', clientId, content: '' });
+}
+
 function printAgentQRCodes(code) {
   const agents = getAvailableAgents();
   const qrFile = path.join(__dirname, '..', 'session_qr.txt');
@@ -245,8 +430,8 @@ function printAgentQRCodes(code) {
   });
 
   if (agents.length === 0) {
-    console.log('⚠️  No agents detected (no API keys found).');
-    console.log('   Install and configure codex, opencode, or others.\n');
+    console.log('⚠️  No agents detected.');
+    console.log('   Install and sign in to Codex or OpenCode.\n');
   }
 
   try {
@@ -258,21 +443,22 @@ function printAgentQRCodes(code) {
 
 const ptySessions = new Map();
 
-function sessionKey(agent) {
-  return `${agent}:${WORKSPACE_CWD}`;
+function sessionKey(agent, sessionId = '') {
+  return `${agent}:${WORKSPACE_CWD}:${sessionId || 'default'}`;
 }
 
-function startPtyAgent(agent, prompt, clientId) {
+function startPtyAgent(agent, prompt, clientId, sessionId = '') {
   if (!pty) throw new Error('node-pty is not installed. Run npm install in backend/.');
   const a = AGENTS.find(x => x.id === agent);
   if (!a) throw new Error(`Unknown agent: ${agent}`);
   if (!a.localPromptCli) throw new Error(`${a.name} is installed as an editor launcher, not a promptable local agent CLI.`);
+  if (a.serverBacked) throw new Error(`${a.name} uses its local HTTP server, not PTY.`);
 
   const cmd = getCmd(a);
   if (!commandExists(cmd)) throw new Error(`${a.name} CLI not found on PATH.`);
-  const args = (PTY_AGENT_ARGS[agent] || ((p) => a.args(p)))(prompt);
+  const args = (PTY_AGENT_ARGS[agent] || ((p) => a.args(p)))(prompt, sessionId);
   const launch = buildPtyAgentLaunch(agent, cmd, args);
-  const id = sessionKey(agent);
+  const id = sessionKey(agent, sessionId);
   console.log(`  [pty] ${a.name} cwd=${WORKSPACE_CWD}`);
   console.log(`  [pty] $ ${launch.command} ${launch.args.join(' ')}`);
 
@@ -318,12 +504,13 @@ function startPtyAgent(agent, prompt, clientId) {
   return session;
 }
 
-function executePtyAgent(agent, prompt, clientId) {
-  const id = sessionKey(agent);
+function executePtyAgent(agent, prompt, clientId, sessionId = '') {
+  const id = sessionKey(agent, sessionId);
   let session = ptySessions.get(id);
   if (!session || session.closed) {
-    send({ type: 'status', clientId, content: `Starting ${agent} in ${WORKSPACE_CWD}` });
-    startPtyAgent(agent, prompt, clientId);
+    const target = sessionId ? ` session ${sessionId}` : '';
+    send({ type: 'status', clientId, content: `Starting ${agent}${target} in ${WORKSPACE_CWD}` });
+    startPtyAgent(agent, prompt, clientId, sessionId);
     return;
   }
 
@@ -338,15 +525,24 @@ function executePtyAgent(agent, prompt, clientId) {
   }, 250);
 }
 
-function executeAgent(agent, prompt, clientId) {
-  return new Promise((resolve) => {
+function executeAgent(agent, prompt, clientId, sessionId = '') {
+  return new Promise(async (resolve) => {
     const a = AGENTS.find(x => x.id === agent);
     if (!a) { send({ type: 'error', clientId, content: `Unknown agent: ${agent}` }); resolve(); return; }
     if (!a.localPromptCli) { send({ type: 'error', clientId, content: `${a.name} is installed as an editor launcher, not a promptable local agent CLI.` }); resolve(); return; }
+    if (a.serverBacked) {
+      try {
+        await sendOpenCodePrompt(prompt, clientId, sessionId);
+      } catch (err) {
+        send({ type: 'error', clientId, content: `OpenCode failed: ${err.message}` });
+      }
+      resolve();
+      return;
+    }
 
     if (process.env.AGENTHUB_ONE_SHOT !== '1') {
       try {
-        executePtyAgent(agent, prompt, clientId);
+        executePtyAgent(agent, prompt, clientId, sessionId);
       } catch (err) {
         send({ type: 'error', clientId, content: `PTY failed: ${err.message}` });
       }
@@ -428,6 +624,7 @@ process.on('SIGINT', () => {
   for (const session of ptySessions.values()) {
     try { session.terminal.kill(); } catch {}
   }
+  try { opencodeServerProcess?.kill(); } catch {}
   if (ws) ws.close();
   process.exit(0);
 });

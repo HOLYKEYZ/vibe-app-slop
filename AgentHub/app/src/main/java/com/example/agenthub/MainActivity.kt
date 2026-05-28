@@ -2,12 +2,16 @@ package com.example.agenthub
 
 import android.content.Context
 import android.content.Intent
+import android.app.Activity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -28,16 +32,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import com.example.agenthub.theme.AgentHubTheme
 import okhttp3.*
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 data class AgentInfo(val id: String, val name: String)
 data class LogLine(val id: Long, val text: String, val type: String = "append")
+data class RemoteSession(val agent: String, val id: String, val title: String, val subtitle: String, val updatedAt: Long = 0)
 
-val AGENT_NAMES = mapOf("codex" to "Codex", "opencode" to "OpenCode", "windsurf" to "Windsurf", "kiro" to "Kiro", "system" to "system")
+val AGENT_NAMES = mapOf("codex" to "Codex", "opencode" to "OpenCode", "system" to "system")
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,6 +106,9 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var showModelPicker by remember { mutableStateOf(false) }
     var relayOnline by remember { mutableStateOf(false) }
     var currentAgent by remember { mutableStateOf(prefs.getString("CURRENT_AGENT", "") ?: "") }
+    var availableAgents by remember { mutableStateOf(listOf<String>()) }
+    var sessions by remember { mutableStateOf(listOf<RemoteSession>()) }
+    var selectedSessionId by remember { mutableStateOf(prefs.getString("SELECTED_SESSION_ID", "") ?: "") }
     var agentModels by remember { mutableStateOf(listOf<String>()) }
     var currentModel by remember { mutableStateOf("") }
 
@@ -103,8 +117,59 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
     val agentName = AGENT_NAMES[currentAgent] ?: "Agent"
 
+    val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull().orEmpty()
+            if (spoken.isNotBlank()) input = listOf(input, spoken).filter { it.isNotBlank() }.joinToString(" ")
+        }
+    }
+
+    fun startVoiceInput() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Prompt ${AGENT_NAMES[currentAgent] ?: "agent"}")
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (e: Exception) {
+            logs = logs + LogLine(System.currentTimeMillis(), "Error: Voice input unavailable (${e.message})")
+        }
+    }
+
     fun stripAnsi(str: String): String {
         return str.replace(Regex("\\u001B\\[[;\\d]*[A-Za-z]"), "").replace(Regex("\\u001B\\]\\d+;[^\\u0007]*\\u0007"), "")
+    }
+
+    fun requestSessions(agent: String = currentAgent) {
+        val j = JSONObject()
+        j.put("type", "session_list")
+        if (agent.isNotBlank()) j.put("agent", agent)
+        webSocket?.send(j.toString())
+    }
+
+    fun requestSessionDetail(session: RemoteSession) {
+        if (session.id.isBlank()) return
+        val j = JSONObject()
+        j.put("type", "session_detail")
+        j.put("agent", session.agent)
+        j.put("sessionId", session.id)
+        webSocket?.send(j.toString())
+    }
+
+    fun parseSessions(arr: JSONArray): List<RemoteSession> {
+        return (0 until arr.length()).mapNotNull { i ->
+            val obj = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = obj.optString("id")
+            if (id.isBlank()) return@mapNotNull null
+            RemoteSession(
+                agent = obj.optString("agent"),
+                id = id,
+                title = obj.optString("title", id),
+                subtitle = obj.optString("subtitle", obj.optString("directory", "")),
+                updatedAt = obj.optLong("updatedAt", 0)
+            )
+        }
     }
 
     val listState = rememberLazyListState()
@@ -140,6 +205,12 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                         when (json.optString("type")) {
                             "session_joined" -> {
                                 relayOnline = json.optBoolean("relay_online", false)
+                                val agents = json.optJSONArray("available_agents")
+                                availableAgents = if (agents != null) (0 until agents.length()).map { agents.getString(it) } else emptyList()
+                                if (currentAgent.isBlank() && availableAgents.isNotEmpty()) {
+                                    currentAgent = availableAgents.first()
+                                    prefs.edit().putString("CURRENT_AGENT", currentAgent).apply()
+                                }
                                 if (currentAgent.isNotBlank()) {
                                     logs = logs + LogLine(System.currentTimeMillis(),
                                         if (relayOnline) "$agentName ready (relay)" else "$agentName waiting for desktop relay")
@@ -152,6 +223,19 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                     }
                                 } else {
                                     logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
+                                }
+                                if (relayOnline) requestSessions(currentAgent)
+                            }
+                            "sessions" -> sessions = parseSessions(json.optJSONArray("sessions") ?: JSONArray())
+                            "session_detail" -> {
+                                val detail = json.optJSONObject("detail")
+                                val messages = detail?.optJSONArray("messages")
+                                if (messages != null) {
+                                    val text = (0 until messages.length()).joinToString("\n\n") { i ->
+                                        val m = messages.optJSONObject(i)
+                                        "${m?.optString("role") ?: "message"}: ${m?.optString("text") ?: ""}"
+                                    }.trim()
+                                    if (text.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), text, "replace")
                                 }
                             }
                             "config_updated" -> {
@@ -190,6 +274,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         if (input.isNotBlank() && wsStatus == "connected" && currentAgent.isNotBlank()) {
             logs = logs + LogLine(System.currentTimeMillis(), "> $input")
             val j = JSONObject(); j.put("agent", currentAgent); j.put("prompt", input)
+            if (selectedSessionId.isNotBlank()) j.put("sessionId", selectedSessionId)
             webSocket?.send(j.toString()); input = ""
         }
     }
@@ -206,12 +291,13 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             }
             if (params.containsKey("code")) sessionCode = params["code"] ?: ""
             if (params.containsKey("agent")) currentAgent = params["agent"] ?: ""
+            selectedSessionId = ""
             if (raw.startsWith("ws") || raw.startsWith("wss")) {
                 val port = if (uri.port > 0) ":${uri.port}" else ""
                 serverUrl = "${uri.scheme}://${uri.host}$port"
             }
             prefs.edit().putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
-                .putString("CURRENT_AGENT", currentAgent).apply()
+                .putString("CURRENT_AGENT", currentAgent).putString("SELECTED_SESSION_ID", "").apply()
             connectWs()
         } catch (_: Exception) {
             sessionCode = raw
@@ -243,7 +329,11 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             onClick = { showSettings = false; showQrScanner = true },
                             modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(16.dp)),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8B5CF6))
-                        ) { Text("Scan QR Code", color = Color.White, fontSize = 16.sp) }
+                        ) {
+                            Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = Color.White)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Scan QR Code", color = Color.White, fontSize = 16.sp)
+                        }
                         Spacer(Modifier.height(12.dp))
                         OutlinedTextField(value = sessionCode, onValueChange = { sessionCode = it },
                             label = { Text("Session Code") }, placeholder = { Text("e.g. Xk3mR9aB2q") },
@@ -252,7 +342,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 unfocusedTextColor = Color.White, focusedTextColor = Color.White, cursorColor = Color.White))
                         Spacer(Modifier.height(8.dp))
                         OutlinedTextField(value = currentAgent, onValueChange = { currentAgent = it },
-                            label = { Text("Agent") }, placeholder = { Text("codex / opencode / windsurf / kiro") },
+                            label = { Text("Agent") }, placeholder = { Text("codex / opencode") },
                             singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF8B5CF6), focusedLabelColor = Color(0xFF8B5CF6),
                                 unfocusedTextColor = Color.White, focusedTextColor = Color.White, cursorColor = Color.White))
@@ -339,6 +429,11 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     ) { Text("Connect", color = Color.White, fontSize = 13.sp) }
                     Spacer(Modifier.width(8.dp))
                 }
+                if (isConnected && relayOnline) {
+                    IconButton(onClick = { requestSessions(currentAgent) }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh sessions", tint = Color(0xFF888888))
+                    }
+                }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color(0xFF888888))
                 }
@@ -346,6 +441,42 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         }
 
         Spacer(Modifier.height(8.dp))
+
+        if (sessions.isNotEmpty()) {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 132.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF15161A)).padding(8.dp)
+            ) {
+                item {
+                    Text("Chats", color = Color(0xFF8B5CF6), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                }
+                items(sessions.take(12)) { session ->
+                    val selected = session.id == selectedSessionId
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) Color(0xFF2F255F) else Color.Transparent)
+                            .clickable {
+                                currentAgent = session.agent
+                                selectedSessionId = session.id
+                                prefs.edit().putString("CURRENT_AGENT", session.agent).putString("SELECTED_SESSION_ID", session.id).apply()
+                                requestSessionDetail(session)
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(if (session.agent == "codex") Color(0xFF4ADE80) else Color(0xFF60A5FA)))
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(session.title, color = Color.White, fontSize = 12.sp, maxLines = 1)
+                            if (session.subtitle.isNotBlank()) Text(session.subtitle, color = Color(0xFF7B7F8A), fontSize = 10.sp, maxLines = 1)
+                        }
+                        Text(AGENT_NAMES[session.agent] ?: session.agent, color = Color(0xFFB8A7FF), fontSize = 10.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
 
         // Chat area
         Box(modifier = Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(16.dp))
@@ -394,6 +525,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
         // Input bar
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = { startVoiceInput() },
+                enabled = isConnected && currentAgent.isNotBlank(),
+                modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF1E1E24))
+            ) {
+                Icon(Icons.Default.Mic, contentDescription = "Voice prompt", tint = if (isConnected && currentAgent.isNotBlank()) Color(0xFFA7F3D0) else Color(0xFF333333))
+            }
+            Spacer(Modifier.width(8.dp))
             TextField(
                 value = input, onValueChange = { input = it },
                 modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).height(48.dp),
@@ -413,7 +552,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 if (isConnected && currentAgent.isNotBlank()) Color(0xFF8B5CF6) else Color(0xFF1E1E24))
                 .clickable(enabled = isConnected && currentAgent.isNotBlank()) { sendMsg() },
                 contentAlignment = Alignment.Center) {
-                Text("➤", color = if (isConnected && currentAgent.isNotBlank()) Color.White else Color(0xFF333333), fontSize = 20.sp)
+                Icon(Icons.Default.Send, contentDescription = "Send", tint = if (isConnected && currentAgent.isNotBlank()) Color.White else Color(0xFF333333))
             }
         }
     }
