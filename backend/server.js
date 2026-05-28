@@ -60,6 +60,20 @@ function send(ws, obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
 
+function getRelayOnline(session) {
+  return session?.relayWs?.readyState === 1;
+}
+
+function extractSseText(event) {
+  return event.choices?.[0]?.delta?.content
+    || event.choices?.[0]?.text
+    || event.delta
+    || event.output_text
+    || event.message?.content?.parts?.[0]
+    || event.response?.output_text
+    || '';
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/health') {
@@ -126,11 +140,18 @@ const wss = new WebSocketServer({ server });
 wss.on('connection', (ws) => {
   ws._code = null;
   ws._role = null;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); }
     catch { send(ws, { type: 'error', content: 'Invalid JSON' }); return; }
+
+    if (msg.type === 'ping') {
+      send(ws, { type: 'pong', ts: Date.now() });
+      return;
+    }
 
     if (msg.type === 'register_relay') {
       const code = generateCode();
@@ -152,8 +173,8 @@ wss.on('connection', (ws) => {
       if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
       const agentModel = {};
       for (const [a, key] of Object.entries(MODEL_KEY)) { if (s.config?.[key]) agentModel[a] = s.config[key]; }
-      send(ws, { type: 'session_joined', code, relay_online: s.relayWs?.readyState === 1, config: s.config || {}, available_models: AGENT_MODELS, agent_model: agentModel });
-      if (s.relayWs?.readyState === 1) send(s.relayWs, { type: 'phone_connected' });
+      send(ws, { type: 'session_joined', code, relay_online: getRelayOnline(s), available_models: AGENT_MODELS, agent_model: agentModel });
+      if (getRelayOnline(s)) send(s.relayWs, { type: 'phone_connected' });
       saveSessions();
       console.log(`[phone] ${code} joined`);
       return;
@@ -182,11 +203,19 @@ wss.on('connection', (ws) => {
     const s = ws._code ? sessions.get(ws._code) : null;
     if (!s) { send(ws, { type: 'error', content: 'No session. Register relay or join with code first.' }); return; }
 
+    if (ws._role === 'relay' && msg.clientId) {
+      const t = sessions.get(msg.clientId);
+      if (t?.phoneWs?.readyState === 1) {
+        send(t.phoneWs, { type: msg.type, content: msg.content || '' });
+      }
+      return;
+    }
+
     const { agent, prompt } = msg;
     if (!agent || !prompt) { send(ws, { type: 'error', content: 'Missing agent or prompt' }); return; }
 
     // Phone → Relay
-    if (ws._role === 'phone' && s.relayWs?.readyState === 1) {
+    if (ws._role === 'phone' && getRelayOnline(s)) {
       send(s.relayWs, { type: 'execute', agent, prompt, clientId: s.code });
       return;
     }
@@ -199,7 +228,7 @@ wss.on('connection', (ws) => {
     }
 
     // Phone → Cloud (relay offline)
-    if (ws._role === 'phone' && (!s.relayWs || s.relayWs.readyState !== 1)) {
+    if (ws._role === 'phone' && !getRelayOnline(s)) {
       send(ws, { type: 'status', content: '⚡ Relay offline — using cloud mode directly' });
       try {
         const cfg = s.config || {};
@@ -244,8 +273,8 @@ async function streamSSE(response, ws) {
       if (line.startsWith('data: ') && line !== 'data: [DONE]') {
         try {
           const d = JSON.parse(line.slice(6));
-          const content = d.choices?.[0]?.delta?.content || d.choices?.[0]?.text || d.message?.content?.parts?.[0] || '';
-          if (content) send(ws, { type: 'replace_stream', content });
+          const content = extractSseText(d);
+          if (content) send(ws, { type: 'stream', content });
         } catch (e) {}
       }
     }
@@ -301,7 +330,7 @@ async function runOpenCodeCloud(ws, cfg, prompt) {
       const { done, value } = await reader.read(); if (done) break;
       buf += decoder.decode(value, { stream: true });
       for (const line of buf.split('\n').slice(0, -1)) {
-        if (line.startsWith('data: ')) { try { const d = JSON.parse(line.slice(6)); const t = d.candidates?.[0]?.content?.parts?.[0]?.text || ''; if (t) send(ws, { type: 'replace_stream', content: t }); } catch (e) {} }
+        if (line.startsWith('data: ')) { try { const d = JSON.parse(line.slice(6)); const t = d.candidates?.[0]?.content?.parts?.[0]?.text || ''; if (t) send(ws, { type: 'stream', content: t }); } catch (e) {} }
       }
       buf = buf.split('\n').pop() || '';
     }
@@ -350,7 +379,7 @@ async function runKiroCloud(ws, cfg, prompt) {
     const client = new BedrockRuntimeClient({ region, credentials: { accessKeyId, secretAccessKey } });
     const resp = await client.send(new ConverseStreamCommand({ modelId, messages: [{ role: 'user', content: [{ text: prompt }] }] }));
     for await (const event of resp.stream) {
-      if (event.contentBlockDelta?.delta?.text) send(ws, { type: 'replace_stream', content: event.contentBlockDelta.delta.text });
+      if (event.contentBlockDelta?.delta?.text) send(ws, { type: 'stream', content: event.contentBlockDelta.delta.text });
       else if (event.messageStop) { send(ws, { type: 'done', content: '\n✅ Kiro complete.' }); return; }
     }
     send(ws, { type: 'done', content: '\n✅ Kiro complete.' });
@@ -358,6 +387,19 @@ async function runKiroCloud(ws, cfg, prompt) {
 }
 
 loadSessions();
+
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  }
+}, 30000);
+
+wss.on('close', () => clearInterval(heartbeat));
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Agent Hub Backend on port ${PORT}`);

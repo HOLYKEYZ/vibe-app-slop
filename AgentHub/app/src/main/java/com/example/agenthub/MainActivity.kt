@@ -3,6 +3,8 @@ package com.example.agenthub
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -53,8 +55,24 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent) }
 }
 
+@Composable
+fun CrashFallback(message: String) {
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0A0A0C)).padding(24.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Agent Hub hit an error", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(message, color = Color(0xFFEF4444), fontSize = 13.sp)
+            Spacer(Modifier.height(16.dp))
+            Text("Close and reopen the app, then use Settings to reconnect.", color = Color(0xFF888888), fontSize = 13.sp)
+        }
+    }
+}
+
 object OkHttpAgent {
-    val client = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
+    val client = OkHttpClient.Builder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .build()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -62,6 +80,11 @@ object OkHttpAgent {
 fun AgentHubScreen(initialDeepLink: String = "") {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("AgentHubPrefs", Context.MODE_PRIVATE) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    fun onUi(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post { block() }
+    }
 
     var input by remember { mutableStateOf("") }
     var logs by remember { mutableStateOf(listOf<LogLine>()) }
@@ -89,59 +112,74 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     val connectWs = {
         webSocket?.close(1000, "Reconnecting")
         logs = emptyList()
-        val request = Request.Builder().url(serverUrl).build()
+        val request = try {
+            Request.Builder().url(serverUrl.trim()).build()
+        } catch (e: Exception) {
+            wsStatus = "disconnected"
+            logs = logs + LogLine(System.currentTimeMillis(), "Error: Invalid server URL (${e.message})")
+            null
+        }
         val listener = object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                wsStatus = "connected"
-                logs = logs + LogLine(System.currentTimeMillis(), "Connected to server")
-                if (sessionCode.isNotBlank()) {
-                    val j = JSONObject(); j.put("type", "join_session"); j.put("code", sessionCode)
-                    ws.send(j.toString())
-                } else {
-                    logs = logs + LogLine(System.currentTimeMillis(), "Enter a session code in Settings")
+                onUi {
+                    wsStatus = "connected"
+                    logs = logs + LogLine(System.currentTimeMillis(), "Connected to server")
+                    if (sessionCode.isNotBlank()) {
+                        val j = JSONObject(); j.put("type", "join_session"); j.put("code", sessionCode)
+                        ws.send(j.toString())
+                    } else {
+                        logs = logs + LogLine(System.currentTimeMillis(), "Enter a session code in Settings")
+                    }
                 }
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
                 try {
                     val json = JSONObject(text)
-                    when (json.optString("type")) {
-                        "session_joined" -> {
-                            relayOnline = json.optBoolean("relay_online", false)
-                            if (currentAgent.isNotBlank()) {
-                                logs = logs + LogLine(System.currentTimeMillis(),
-                                    if (relayOnline) "$agentName ready (relay)" else "$agentName ready (cloud)")
-                                val m = json.optJSONObject("agent_model")
-                                if (m != null && m.has(currentAgent)) currentModel = m.getString(currentAgent)
-                                val models = json.optJSONObject("available_models")
-                                if (models != null && models.has(currentAgent)) {
-                                    val arr = models.optJSONArray(currentAgent)
-                                    if (arr != null) agentModels = (0 until arr.length()).map { arr.getString(it) }
+                    onUi {
+                        when (json.optString("type")) {
+                            "session_joined" -> {
+                                relayOnline = json.optBoolean("relay_online", false)
+                                if (currentAgent.isNotBlank()) {
+                                    logs = logs + LogLine(System.currentTimeMillis(),
+                                        if (relayOnline) "$agentName ready (relay)" else "$agentName ready (cloud)")
+                                    val m = json.optJSONObject("agent_model")
+                                    if (m != null && m.has(currentAgent)) currentModel = m.getString(currentAgent)
+                                    val models = json.optJSONObject("available_models")
+                                    if (models != null && models.has(currentAgent)) {
+                                        val arr = models.optJSONArray(currentAgent)
+                                        if (arr != null) agentModels = (0 until arr.length()).map { arr.getString(it) }
+                                    }
+                                } else {
+                                    logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
                                 }
-                            } else {
-                                logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
                             }
-                        }
-                        "config_updated" -> {
-                            val cfg = json.optJSONObject("config")
-                            if (cfg != null && currentAgent.isNotBlank()) {
-                                val modelKey = currentAgent.uppercase() + "_MODEL"
-                                if (cfg.has(modelKey)) currentModel = cfg.getString(modelKey)
+                            "config_updated" -> {
+                                val cfg = json.optJSONObject("config")
+                                if (cfg != null && currentAgent.isNotBlank()) {
+                                    val modelKey = currentAgent.uppercase() + "_MODEL"
+                                    if (cfg.has(modelKey)) currentModel = cfg.getString(modelKey)
+                                }
                             }
+                            "stream" -> logs = logs + LogLine(System.currentTimeMillis(), stripAnsi(json.optString("content")))
+                            "replace_stream" -> logs = logs + LogLine(System.currentTimeMillis(), stripAnsi(json.optString("content")), "replace")
+                            "status", "system" -> logs = logs + LogLine(System.currentTimeMillis(), json.optString("content"))
+                            "done" -> { val c = json.optString("content"); if (c.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), c) }
+                            "error" -> logs = logs + LogLine(System.currentTimeMillis(), "Error: ${json.optString("content")}")
                         }
-                        "stream" -> logs = logs + LogLine(System.currentTimeMillis(), stripAnsi(json.optString("content")))
-                        "replace_stream" -> logs = logs + LogLine(System.currentTimeMillis(), stripAnsi(json.optString("content")), "replace")
-                        "status", "system" -> logs = logs + LogLine(System.currentTimeMillis(), json.optString("content"))
-                        "done" -> { val c = json.optString("content"); if (c.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), c) }
-                        "error" -> logs = logs + LogLine(System.currentTimeMillis(), "Error: ${json.optString("content")}")
                     }
                 } catch (_: Exception) {}
             }
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) { wsStatus = "disconnected" }
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) { wsStatus = "disconnected" }
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) { onUi { wsStatus = "disconnected" } }
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                onUi {
+                    wsStatus = "disconnected"
+                    logs = logs + LogLine(System.currentTimeMillis(), "Error: ${t.message ?: "Connection failed"}")
+                }
+            }
         }
-        webSocket = OkHttpAgent.client.newWebSocket(request, listener)
+        if (request != null) webSocket = OkHttpAgent.client.newWebSocket(request, listener)
     }
 
     DisposableEffect(serverUrl) { connectWs(); onDispose { webSocket?.close(1000, "Closing") } }
@@ -161,11 +199,16 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         try {
             val uri = java.net.URI(if (raw.startsWith("ws") || raw.startsWith("wss")) raw else "ws://x/$raw")
             val query = uri.query ?: ""
-            val params = query.split("&").associate { kv -> kv.split("=", limit=2).let { it[0] to (it.getOrElse(1) { "" }) } }
+            val params = query.split("&").filter { it.isNotBlank() }.associate { kv ->
+                kv.split("=", limit=2).let {
+                    java.net.URLDecoder.decode(it[0], "UTF-8") to java.net.URLDecoder.decode(it.getOrElse(1) { "" }, "UTF-8")
+                }
+            }
             if (params.containsKey("code")) sessionCode = params["code"] ?: ""
             if (params.containsKey("agent")) currentAgent = params["agent"] ?: ""
             if (raw.startsWith("ws") || raw.startsWith("wss")) {
-                serverUrl = "${uri.scheme}://${uri.host}:${uri.port}"
+                val port = if (uri.port > 0) ":${uri.port}" else ""
+                serverUrl = "${uri.scheme}://${uri.host}$port"
             }
             prefs.edit().putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
                 .putString("CURRENT_AGENT", currentAgent).apply()
@@ -174,6 +217,10 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             sessionCode = raw
             prefs.edit().putString("SESSION_CODE", raw).apply(); connectWs()
         }
+    }
+
+    LaunchedEffect(initialDeepLink) {
+        if (initialDeepLink.isNotBlank()) onQrScanned(initialDeepLink)
     }
 
     val isConnected = wsStatus == "connected"
