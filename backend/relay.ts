@@ -75,7 +75,7 @@ function openExternalUrl(url) {
 
 function openCodexDesktopThread(sessionId, clientId) {
   if (!sessionId || process.env.AGENTHUB_OPEN_CODEX_DESKTOP === '0') return;
-  openExternalUrl(`codex://local/${encodeURIComponent(sessionId)}`);
+  openExternalUrl(`codex://threads/${encodeURIComponent(sessionId)}`);
   if (clientId) send({ type: 'status', clientId, content: 'Opening Codex Desktop chat' });
 }
 
@@ -785,7 +785,7 @@ function parseCodexAppThreadDetail(thread) {
   const tools = [];
   const files = new Set();
 
-  for (const turn of thread?.turns || []) {
+  for (const turn of [...(thread?.turns || [])].reverse()) {
     for (const item of turn.items || []) {
       if (item.type === 'userMessage') {
         const text = stripTerminalNoise(userInputText(item.content));
