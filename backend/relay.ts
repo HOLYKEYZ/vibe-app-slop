@@ -852,6 +852,12 @@ function turnSortValue(turn) {
   );
 }
 
+function statusType(status) {
+  if (!status) return '';
+  if (typeof status === 'string') return status;
+  return status.type || '';
+}
+
 function parseCodexAppThreadDetail(thread) {
   const messages = [];
   const commands = [];
@@ -859,6 +865,8 @@ function parseCodexAppThreadDetail(thread) {
   const files = new Set();
   const turns = [...(thread?.turns || [])].sort((a, b) => turnSortValue(a) - turnSortValue(b));
   const latestTurn = turns[turns.length - 1] || null;
+  const latestTurnStatus = statusType(latestTurn?.status);
+  const status = ['active', 'inProgress', 'running'].includes(latestTurnStatus) ? 'active' : 'idle';
 
   for (const turn of turns) {
     const includeTurnEvents = latestTurn && turn?.id === latestTurn.id;
@@ -902,7 +910,7 @@ function parseCodexAppThreadDetail(thread) {
     tools: tools.slice(-80),
     metadataScope: latestTurn?.id ? 'latest_turn' : 'none',
     metadataTurnId: latestTurn?.id || '',
-    status: thread.status?.type || '',
+    status,
   };
 }
 
@@ -1372,11 +1380,24 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
     send({ type: 'status', clientId, content: `Steering active Codex turn ${activeTurn.id}` });
     scheduleCodexDesktopRefreshBurst(sessionId, clientId);
     console.log(`  [codex-app] steer ${sessionId} turn=${activeTurn.id}`);
-    await callCodexApp('turn/steer', {
-      threadId: sessionId,
-      expectedTurnId: activeTurn.id,
-      input: [{ type: 'text', text: prompt, text_elements: [] }],
-    }, 60000);
+    try {
+      await callCodexApp('turn/steer', {
+        threadId: sessionId,
+        expectedTurnId: activeTurn.id,
+        input: [{ type: 'text', text: prompt, text_elements: [] }],
+      }, 60000);
+    } catch (err) {
+      const actualTurnId = String(err.message || '').match(/found `([^`]+)`/)?.[1];
+      if (!actualTurnId) throw err;
+      tracker.turnId = actualTurnId;
+      send({ type: 'status', clientId, content: `Steering current Codex turn ${actualTurnId}` });
+      console.log(`  [codex-app] steer retry ${sessionId} turn=${actualTurnId}`);
+      await callCodexApp('turn/steer', {
+        threadId: sessionId,
+        expectedTurnId: actualTurnId,
+        input: [{ type: 'text', text: prompt, text_elements: [] }],
+      }, 60000);
+    }
     await tracker.completion;
     const detail = await getCodexSessionDetail(sessionId).catch(() => null);
     if (detail) send({ type: 'session_detail', clientId, detail });
