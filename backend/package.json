@@ -7,7 +7,8 @@
     "start": "node server.js",
     "build:relay": "tsc -p tsconfig.json",
     "check:relay": "tsc --noEmit -p tsconfig.json",
-    "relay": "npm run build:relay && node dist/relay.js"
+    "relay": "npm run build:relay && node dist/relay.js",
+    "smoke:relay": "node ../scripts/relay-smoke.js"
   },
   "dependencies": {
     "qrcode": "^1.5.4",

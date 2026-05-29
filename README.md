@@ -88,6 +88,16 @@ node relay.js
 
 Open Agent Hub, scan the QR code, pick a visible chat, and send a prompt.
 
+### 5. Smoke test the relay
+
+From the repo root, run a phone-style join/list/detail/reconnect check without sending any prompts:
+
+```powershell
+$env:SERVER_URL="wss://agent-hub-backend-wk48.onrender.com"
+$env:RELAY_CODE="EtCjwygP8e"
+node .\scripts\relay-smoke.js
+```
+
 ## Agents
 
 | Agent | How it is driven |
