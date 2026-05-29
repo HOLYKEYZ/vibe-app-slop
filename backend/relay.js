@@ -479,6 +479,22 @@ function truncateText(value, max = 140) {
   return `${text.slice(0, max - 1)}...`;
 }
 
+const DETAIL_MESSAGE_LIMIT = 80;
+const DETAIL_MESSAGE_CHARS = 6000;
+
+function capMessageText(value, max = DETAIL_MESSAGE_CHARS) {
+  const text = stripTerminalNoise(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n\n[message truncated for phone]`;
+}
+
+function capDetailMessages(messages, limit = DETAIL_MESSAGE_LIMIT) {
+  return (messages || []).slice(-limit).map((message) => ({
+    ...message,
+    text: capMessageText(message.text || ''),
+  }));
+}
+
 function readJsonLine(line) {
   try { return JSON.parse(line); } catch { return null; }
 }
@@ -769,7 +785,7 @@ function parseCodexAppThreadDetail(thread) {
     project: codexThreadProject(thread),
     path: thread.path || '',
     updatedAt: Number(thread.updatedAt || 0) * 1000,
-    messages: messages.slice(-300),
+    messages: capDetailMessages(messages),
     files: [...files],
     commands: commands.slice(-80),
     tools: tools.slice(-80),
@@ -980,14 +996,14 @@ function formatOpenCodeMessage(message) {
 async function getOpenCodeSessionDetail(sessionId) {
   await ensureOpenCodeServer();
   const [messagesJson, diffJson, todoJson] = await Promise.all([
-    requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/message?limit=100`).catch((err) => ({ error: err.message })),
+    requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/message?limit=60`).catch((err) => ({ error: err.message })),
     requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/diff`).catch(() => []),
     requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(sessionId)}/todo`).catch(() => []),
   ]);
   return {
     agent: 'opencode',
     sessionId,
-    messages: responseItems(messagesJson).map(formatOpenCodeMessage),
+    messages: capDetailMessages(responseItems(messagesJson).map(formatOpenCodeMessage), 60),
     diff: responseItems(diffJson),
     todo: responseItems(todoJson),
   };
@@ -1020,7 +1036,7 @@ async function getCodexSessionDetail(sessionId) {
     project: parsed.meta.cwd ? path.basename(parsed.meta.cwd) : '',
     path: file,
     updatedAt: parsed.updatedAt,
-    messages: parsed.messages.slice(-300),
+    messages: capDetailMessages(parsed.messages),
     files: parsed.files,
     commands: parsed.commands.slice(-50),
     tools: parsed.tools.slice(-50),

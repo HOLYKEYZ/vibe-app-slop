@@ -64,6 +64,9 @@ data class RemoteSession(val agent: String, val id: String, val title: String, v
 data class PendingAttachment(val name: String, val mime: String, val base64: String, val size: Int)
 
 val AGENT_NAMES = mapOf("codex" to "Codex", "opencode" to "OpenCode", "system" to "system")
+const val MAX_DETAIL_MESSAGES_ON_PHONE = 40
+const val MAX_DETAIL_MESSAGE_CHARS = 3000
+const val MAX_DETAIL_TOTAL_CHARS = 60000
 
 fun parseRemoteSessions(raw: String): List<RemoteSession> {
     if (raw.isBlank()) return emptyList()
@@ -387,7 +390,32 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         if (looksLikeTerminalPaste && cleaned.length > 1200) {
             return "[long terminal paste hidden in chat view; use the Codex desktop chat for the original paste]"
         }
-        return cleaned
+        if (cleaned.length <= MAX_DETAIL_MESSAGE_CHARS) return cleaned
+        return cleaned.take(MAX_DETAIL_MESSAGE_CHARS) + "\n\n[message truncated on phone]"
+    }
+
+    fun detailMessageLogs(messages: JSONArray?): List<LogLine> {
+        if (messages == null || messages.length() == 0) return emptyList()
+        val start = maxOf(0, messages.length() - MAX_DETAIL_MESSAGES_ON_PHONE)
+        val out = mutableListOf<LogLine>()
+        var totalChars = 0
+        if (start > 0) {
+            out += LogLine(System.currentTimeMillis(), "Showing latest ${messages.length() - start} messages. Older history is hidden on phone to keep the app responsive.", "status")
+        }
+        for (i in start until messages.length()) {
+            val m = messages.optJSONObject(i) ?: continue
+            val role = m.optString("role", "message")
+            if (role != "user" && role != "assistant") continue
+            val text = compactChatText(m.optString("text", ""))
+            if (text.isBlank()) continue
+            totalChars += text.length
+            if (totalChars > MAX_DETAIL_TOTAL_CHARS) {
+                out += LogLine(System.currentTimeMillis() + i, "More history hidden on phone to keep the app responsive.", "status")
+                break
+            }
+            out += LogLine(System.currentTimeMillis() + i, text, role)
+        }
+        return out
     }
 
     val listState = rememberLazyListState()
@@ -499,17 +527,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             "session_detail" -> {
                                 val detail = json.optJSONObject("detail")
                                 val messages = detail?.optJSONArray("messages")
-                                val chatLogs = if (messages != null) {
-                                    val chatLogs = (0 until messages.length()).mapNotNull { i ->
-                                        val m = messages.optJSONObject(i)
-                                        val role = m?.optString("role") ?: "message"
-                                        val text = compactChatText(m?.optString("text") ?: "")
-                                        if ((role == "user" || role == "assistant") && text.isNotBlank()) {
-                                            LogLine(System.currentTimeMillis() + i, text, role)
-                                        } else null
-                                    }
-                                    chatLogs
-                                } else emptyList()
+                                val chatLogs = detailMessageLogs(messages)
                                 val extras = detailExtraLogs(detail, System.currentTimeMillis() + 10000)
                                 if (chatLogs.isNotEmpty() || extras.isNotEmpty()) logs = chatLogs + extras
                             }
