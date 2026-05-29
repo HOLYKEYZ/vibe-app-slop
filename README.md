@@ -14,7 +14,7 @@ Phone --wss--> Relay Server <--wss-- Laptop relay
 
 - Relay-only execution: the cloud server never calls model APIs and does not need API keys.
 - QR or manual pairing: keep the same Render URL and swap only the session code/agent.
-- Codex support: lists Codex app chats including loaded/current chats, opens a selected chat in Codex Desktop with `codex://threads/<threadId>`, resumes/steers turns through the local Codex app-server, and blocks accidental new Codex sessions from the phone.
+- Codex support: lists Codex app chats including loaded/current chats, opens a selected chat in Codex Desktop with `codex://local/<threadId>`, resumes/steers turns through the local Codex app-server, and blocks accidental new Codex sessions from the phone.
 - OpenCode support: starts or reuses the local OpenCode HTTP server, lists recent OpenCode sessions, and prompts a selected session.
 - Live phone transcript: shows user prompts, assistant responses, thinking/status events, shell/tool activity, and file-change summaries without dumping stale terminal noise.
 - Technical event toggle: command output plus latest-turn tool/file counts stay hidden unless explicitly enabled in Settings.

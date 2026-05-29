@@ -28,6 +28,7 @@ if (-not $SkipPowerConfig) {
     # can suspend Windows and the local Codex/OpenCode processes stop responding.
     $powerSettings = @(
         @("SUB_BUTTONS", "LIDACTION", "0"),
+        @("4f971e89-eebd-4455-a8de-9e59040e7347", "5ca83367-6e45-459f-a27b-476b1d01c936", "0"),
         @("SUB_SLEEP", "STANDBYIDLE", "0"),
         @("SUB_SLEEP", "HIBERNATEIDLE", "0")
     )
