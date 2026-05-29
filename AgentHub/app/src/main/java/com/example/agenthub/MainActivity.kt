@@ -452,8 +452,18 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         }
     }
 
+    fun hideCodexAppDirectives(text: String): String {
+        return text.lines()
+            .filterNot { line ->
+                val trimmed = line.trim()
+                trimmed.startsWith("::") && trimmed.contains("{") && trimmed.endsWith("}")
+            }
+            .joinToString("\n")
+            .trim()
+    }
+
     fun compactChatText(text: String): String {
-        val cleaned = compactLocalPaths(stripAnsi(text).trim())
+        val cleaned = hideCodexAppDirectives(compactLocalPaths(stripAnsi(text).trim()))
         val looksLikeTerminalPaste = cleaned.contains("Windows PowerShell") ||
             cleaned.contains("node relay.js") ||
             cleaned.contains("════════") ||
