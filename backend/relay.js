@@ -57,6 +57,27 @@ function spawnCodexCommand(args) {
   return spawnAgentCommand(process.env.CODEX_PATH || 'codex', args);
 }
 
+function openExternalUrl(url) {
+  try {
+    if (isWin) {
+      spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'start', '""', url], {
+        stdio: 'ignore',
+        windowsHide: true,
+        detached: true,
+      }).unref();
+      return;
+    }
+    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    spawn(opener, [url], { stdio: 'ignore', detached: true }).unref();
+  } catch {}
+}
+
+function openCodexDesktopThread(sessionId, clientId) {
+  if (!sessionId || process.env.AGENTHUB_OPEN_CODEX_DESKTOP === '0') return;
+  openExternalUrl(`codex://threads/${encodeURIComponent(sessionId)}`);
+  if (clientId) send({ type: 'status', clientId, content: 'Opening Codex Desktop chat' });
+}
+
 function buildWindowsCommandLine(cmd, args) {
   return [quoteCmdArg(cmd), ...args.map(quoteCmdArg)].join(' ');
 }
@@ -1214,6 +1235,7 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
 
   const detail = await getCodexSessionDetail(sessionId).catch(() => null);
   if (detail) send({ type: 'session_detail', clientId, detail });
+  openCodexDesktopThread(sessionId);
 }
 
 async function sendCodexPrompt(prompt, clientId, sessionId, attachments = []) {
@@ -1221,6 +1243,7 @@ async function sendCodexPrompt(prompt, clientId, sessionId, attachments = []) {
     throw new Error('Pick a Codex chat first. This build blocks accidental new Codex sessions from the phone.');
   }
   prompt = promptWithAttachments(prompt, attachments, clientId);
+  openCodexDesktopThread(sessionId, clientId);
 
   try {
     await sendCodexAppPrompt(prompt, clientId, sessionId);
