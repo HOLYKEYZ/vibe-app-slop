@@ -14,7 +14,7 @@ Phone --wss--> Relay Server <--wss-- Laptop relay
 
 - Relay-only execution: the cloud server never calls model APIs and does not need API keys.
 - QR or manual pairing: keep the same Render URL and swap only the session code/agent.
-- Codex support: lists Codex app chats including loaded/current chats, opens a selected chat in Codex Desktop with `codex://local/<threadId>`, resumes/steers turns through the local Codex app-server, and blocks accidental new Codex sessions from the phone.
+- Codex support: lists Codex app chats including loaded/current chats, opens a selected chat in Codex Desktop with `codex://threads/<threadId>`, resumes/steers turns through the local Codex app-server, and blocks accidental new Codex sessions from the phone.
 - OpenCode support: starts or reuses the local OpenCode HTTP server, lists recent OpenCode sessions, and prompts a selected session.
 - Live phone transcript: shows user prompts, assistant responses, thinking/status events, shell/tool activity, and file-change summaries without dumping stale terminal noise.
 - Technical event toggle: command output, aggregate tool lists, and file counts stay hidden unless explicitly enabled in Settings.
@@ -68,6 +68,14 @@ $env:SERVER_URL="wss://agent-hub-backend-wk48.onrender.com"
 node relay.js
 ```
 
+For the current Windows laptop workflow, use the keep-awake launcher from the repo root:
+
+```powershell
+.\scripts\start-relay-keepawake.ps1 -RelayCode EtCjwygP8e
+```
+
+That script sets the current Windows power plan to keep the machine awake and to do nothing on lid close for AC and battery power, then starts the relay in the background with logs in `%TEMP%`. Use `-Foreground` if you want the relay output in the current terminal, or `-SkipPowerConfig` if you only want to start the relay.
+
 To force a new code:
 
 ```powershell
@@ -103,5 +111,6 @@ Open Agent Hub, scan the QR code, pick a visible chat, and send a prompt.
 
 - The phone app can keep `wss://agent-hub-backend-wk48.onrender.com` as the server URL. The session code and selected agent are separate settings.
 - The cloud server is only a WebSocket switchboard between phone and laptop relay. Codex/OpenCode credentials and files stay on the laptop.
+- The relay can survive the lid closing only if Windows stays awake. Use `scripts/start-relay-keepawake.ps1` or set your power plan manually.
 - Uploads are stored under `.agenthub_uploads/` in the relay working directory.
 - If the exact screenshot asset is needed, save it under `docs/screenshots/` and replace the README image path.

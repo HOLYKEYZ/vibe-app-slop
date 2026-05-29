@@ -1,0 +1,72 @@
+param(
+    [string]$ServerUrl = "wss://agent-hub-backend-wk48.onrender.com",
+    [string]$RelayCode = "",
+    [bool]$StopExisting = $true,
+    [switch]$Foreground,
+    [switch]$SkipPowerConfig
+)
+
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$backendDir = Join-Path $repoRoot "backend"
+$nodeExe = "node"
+
+function Invoke-PowerCfgSafe {
+    param([string[]]$ArgsToPass)
+    try {
+        & powercfg @ArgsToPass | Out-Null
+        return $true
+    } catch {
+        Write-Warning "powercfg $($ArgsToPass -join ' ') failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+if (-not $SkipPowerConfig) {
+    # Keep the machine awake for this relay workflow. Without this, closing the lid
+    # can suspend Windows and the local Codex/OpenCode processes stop responding.
+    $powerSettings = @(
+        @("SUB_BUTTONS", "LIDACTION", "0"),
+        @("SUB_SLEEP", "STANDBYIDLE", "0"),
+        @("SUB_SLEEP", "HIBERNATEIDLE", "0")
+    )
+
+    foreach ($setting in $powerSettings) {
+        Invoke-PowerCfgSafe -ArgsToPass @("/setacvalueindex", "SCHEME_CURRENT", $setting[0], $setting[1], $setting[2]) | Out-Null
+        Invoke-PowerCfgSafe -ArgsToPass @("/setdcvalueindex", "SCHEME_CURRENT", $setting[0], $setting[1], $setting[2]) | Out-Null
+    }
+    Invoke-PowerCfgSafe -ArgsToPass @("/setactive", "SCHEME_CURRENT") | Out-Null
+}
+
+if ($StopExisting) {
+    Get-CimInstance Win32_Process |
+        Where-Object { $_.Name -eq "node.exe" -and $_.CommandLine -match "\brelay\.js\b" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+}
+
+$env:SERVER_URL = $ServerUrl
+if ($RelayCode.Trim().Length -gt 0) {
+    $env:AGENTHUB_RELAY_CODE = $RelayCode.Trim()
+}
+
+if ($Foreground) {
+    Push-Location $backendDir
+    try {
+        & $nodeExe relay.js
+    } finally {
+        Pop-Location
+    }
+    exit $LASTEXITCODE
+}
+
+$logPath = Join-Path $env:TEMP "agenthub-render-relay-live.log"
+$errPath = Join-Path $env:TEMP "agenthub-render-relay-live.err.log"
+$process = Start-Process -FilePath $nodeExe -ArgumentList "relay.js" -WorkingDirectory $backendDir `
+    -RedirectStandardOutput $logPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
+
+Write-Host "Agent Hub relay started."
+Write-Host "PID: $($process.Id)"
+Write-Host "Server: $ServerUrl"
+Write-Host "Stdout: $logPath"
+Write-Host "Stderr: $errPath"
