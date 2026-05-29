@@ -8,6 +8,7 @@ import android.app.Activity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
 import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.util.Base64
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
@@ -54,6 +56,7 @@ import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -197,11 +200,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var hasPausedOnce by remember { mutableStateOf(false) }
     var attachments by remember { mutableStateOf(listOf<PendingAttachment>()) }
     var lastConnectAttemptAt by remember { mutableStateOf(0L) }
+    var showTechnicalEvents by remember { mutableStateOf(prefs.getBoolean("SHOW_TECHNICAL_EVENTS", false)) }
+    var stickToBottom by remember { mutableStateOf(true) }
 
     var sessionCode by remember { mutableStateOf(prefs.getString("SESSION_CODE", "") ?: "") }
     var serverUrl by remember { mutableStateOf(prefs.getString("SERVER_URL", "wss://agent-hub-backend-wk48.onrender.com") ?: "") }
 
     val agentName = AGENT_NAMES[currentAgent] ?: "Agent"
+    val scrollScope = rememberCoroutineScope()
 
     val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
@@ -331,6 +337,11 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         return consolidatedLogs().map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n").takeLast(200000)
     }
 
+    fun appendLog(line: LogLine) {
+        if (logs.lastOrNull()?.text == line.text && logs.lastOrNull()?.type == line.type) return
+        logs = logs + line
+    }
+
     fun statusLogType(text: String): String {
         val value = text.trim()
         return when {
@@ -371,6 +382,46 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             out += LogLine(next++, "todo: ${todo.length()} item(s)", "tool")
         }
         return out
+    }
+
+    fun statusForPhone(content: String): LogLine? {
+        val raw = content.trim()
+        if (raw.isBlank()) return null
+        val type = statusLogType(raw)
+        if (showTechnicalEvents) return LogLine(System.currentTimeMillis(), raw, type)
+        val lower = raw.lowercase()
+        val summary = when {
+            lower.startsWith("command output:") -> null
+            lower.startsWith("command:") -> "Running command"
+            lower.startsWith("tool:") || lower.startsWith("mcp_") || lower.startsWith("patch_") -> "Using tool"
+            lower.startsWith("web_search") || lower.startsWith("tool_search") || lower.contains("browser") -> "Using browser/search"
+            lower.startsWith("file diff:") || lower.startsWith("file:") || lower.startsWith("files:") -> "Editing files"
+            lower.startsWith("thinking") -> "Thinking"
+            lower.startsWith("opening codex chat") -> "Opening selected Codex chat"
+            lower.startsWith("starting codex turn") -> "Starting Codex turn"
+            lower.startsWith("steering active codex turn") -> "Steering active Codex turn"
+            lower.startsWith("sending to codex chat") -> "Sending to selected Codex chat"
+            lower.startsWith("sending to opencode session") -> "Sending to selected OpenCode session"
+            lower.startsWith("opencode accepted prompt") -> "OpenCode accepted prompt"
+            else -> raw
+        } ?: return null
+        return LogLine(System.currentTimeMillis(), summary, type)
+    }
+
+    fun openUpdatePage() {
+        val base = serverUrl.trim()
+            .replaceFirst("wss://", "https://")
+            .replaceFirst("ws://", "http://")
+            .trimEnd('/')
+        if (base.isBlank()) {
+            appendLog(LogLine(System.currentTimeMillis(), "Error: Server URL is empty"))
+            return
+        }
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$base/download")))
+        } catch (e: Exception) {
+            appendLog(LogLine(System.currentTimeMillis(), "Error: Could not open update page (${e.message})"))
+        }
     }
 
     fun copyVisibleTranscript() {
@@ -474,8 +525,8 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                     prefs.edit().putString("CURRENT_AGENT", currentAgent).apply()
                                 }
                                 if (currentAgent.isNotBlank()) {
-                                    logs = logs + LogLine(System.currentTimeMillis(),
-                                        if (relayOnline) "$agentName ready (relay)" else "$agentName waiting for desktop relay")
+                                    appendLog(LogLine(System.currentTimeMillis(),
+                                        if (relayOnline) "$agentName ready (relay code $targetSessionCode)" else "$agentName waiting for desktop relay on code $targetSessionCode"))
                                     val m = json.optJSONObject("agent_model")
                                     if (m != null && m.has(currentAgent)) currentModel = m.getString(currentAgent)
                                     val models = json.optJSONObject("available_models")
@@ -484,7 +535,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                         if (arr != null) agentModels = (0 until arr.length()).map { arr.getString(it) }
                                     }
                                 } else {
-                                    logs = logs + LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)")
+                                    appendLog(LogLine(System.currentTimeMillis(), "Connected (scan QR or set agent in settings)"))
                                 }
                                 if (relayOnline) {
                                     mainHandler.postDelayed({
@@ -542,7 +593,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             "replace_stream" -> logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "replace")
                             "status", "system" -> {
                                 val content = json.optString("content")
-                                logs = logs + LogLine(System.currentTimeMillis(), content, statusLogType(content))
+                                statusForPhone(content)?.let { appendLog(it) }
                             }
                             "done" -> { val c = json.optString("content"); if (c.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), c) }
                             "error" -> logs = logs + LogLine(System.currentTimeMillis(), "Error: ${json.optString("content")}")
@@ -585,13 +636,25 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    val isNearBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val total = info.totalItemsCount
+            total == 0 || (info.visibleItemsInfo.lastOrNull()?.index ?: 0) >= total - 3
+        }
+    }
+
+    LaunchedEffect(isNearBottom) {
+        stickToBottom = isNearBottom
+    }
+
     LaunchedEffect(logs) {
         val text = visibleTranscript()
         prefs.edit().putString("LAST_TRANSCRIPT", text.takeLast(200000)).apply()
         val renderedCount = consolidatedLogs().size
-        if (renderedCount > 0) {
+        if (renderedCount > 0 && stickToBottom) {
             try {
-                listState.animateScrollToItem(renderedCount - 1)
+                listState.scrollToItem(renderedCount - 1)
             } catch (_: Exception) {}
         }
     }
@@ -720,6 +783,35 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF8B5CF6), focusedLabelColor = Color(0xFF8B5CF6),
                                 unfocusedTextColor = Color.White, focusedTextColor = Color.White, cursorColor = Color.White))
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Show command details", color = Color.White, fontSize = 13.sp)
+                                Text("Off hides terminal output and paths", color = Color(0xFF8F96A3), fontSize = 11.sp)
+                            }
+                            Switch(
+                                checked = showTechnicalEvents,
+                                onCheckedChange = {
+                                    showTechnicalEvents = it
+                                    prefs.edit().putBoolean("SHOW_TECHNICAL_EVENTS", it).apply()
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF8B5CF6))
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = { openUpdatePage() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp).clip(RoundedCornerShape(14.dp)),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F255F))
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Open App Update Page", color = Color.White, fontSize = 14.sp)
+                        }
                     }
                 }
             },
@@ -728,7 +820,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     TextButton(onClick = { showSettings = false }) { Text("Cancel", color = Color.Gray) }
                     TextButton(onClick = {
                         prefs.edit().putString("SESSION_CODE", sessionCode).putString("SERVER_URL", serverUrl)
-                            .putString("CURRENT_AGENT", currentAgent).apply()
+                            .putString("CURRENT_AGENT", currentAgent).putBoolean("SHOW_TECHNICAL_EVENTS", showTechnicalEvents).apply()
                         showSettings = false; connectWs(null, null)
                     }) { Text("Save", color = Color(0xFF8B5CF6)) }
                 }
@@ -877,6 +969,21 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     modifier = Modifier.align(Alignment.TopEnd).size(36.dp)
                 ) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy transcript", tint = Color(0xFF888888))
+                }
+                if (!isNearBottom) {
+                    IconButton(
+                        onClick = {
+                            scrollScope.launch {
+                                val count = consolidatedLogs().size
+                                if (count > 0) listState.scrollToItem(count - 1)
+                                stickToBottom = true
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.BottomEnd).size(44.dp)
+                            .clip(CircleShape).background(Color(0xFF3B2F79))
+                    ) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Scroll to latest", tint = Color.White)
+                    }
                 }
             }
             if (!isConnected) {
