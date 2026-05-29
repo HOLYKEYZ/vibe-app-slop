@@ -199,6 +199,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var connectionSeq by remember { mutableStateOf(0L) }
     var hasPausedOnce by remember { mutableStateOf(false) }
     var attachments by remember { mutableStateOf(listOf<PendingAttachment>()) }
+    var promptRunning by remember { mutableStateOf(false) }
     var lastConnectAttemptAt by remember { mutableStateOf(0L) }
     var showTechnicalEvents by remember { mutableStateOf(prefs.getBoolean("SHOW_TECHNICAL_EVENTS", false)) }
     var stickToBottom by remember { mutableStateOf(true) }
@@ -581,6 +582,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 val chatLogs = detailMessageLogs(messages)
                                 val extras = if (showTechnicalEvents) detailExtraLogs(detail, System.currentTimeMillis() + 10000) else emptyList()
                                 if (chatLogs.isNotEmpty() || extras.isNotEmpty()) logs = chatLogs + extras
+                                if (promptRunning) promptRunning = false
                             }
                             "config_updated" -> {
                                 val cfg = json.optJSONObject("config")
@@ -589,14 +591,32 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                     if (cfg.has(modelKey)) currentModel = cfg.getString(modelKey)
                                 }
                             }
-                            "stream" -> logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "assistant")
-                            "replace_stream" -> logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "replace")
+                            "stream" -> {
+                                promptRunning = true
+                                logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "assistant")
+                            }
+                            "replace_stream" -> {
+                                promptRunning = true
+                                logs = logs + LogLine(System.currentTimeMillis(), compactChatText(json.optString("content")), "replace")
+                            }
                             "status", "system" -> {
                                 val content = json.optString("content")
+                                val lower = content.lowercase(Locale.ROOT)
+                                if (lower.contains("starting") || lower.contains("steering") || lower.contains("working") || lower.contains("codex started")) {
+                                    promptRunning = true
+                                } else if (lower.contains("finished") || lower.contains("completed") || lower.contains("exited")) {
+                                    promptRunning = false
+                                }
                                 statusForPhone(content)?.let { appendLog(it) }
                             }
-                            "done" -> { val c = json.optString("content"); if (c.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), c) }
-                            "error" -> logs = logs + LogLine(System.currentTimeMillis(), "Error: ${json.optString("content")}")
+                            "done" -> {
+                                promptRunning = false
+                                val c = json.optString("content"); if (c.isNotBlank()) logs = logs + LogLine(System.currentTimeMillis(), c)
+                            }
+                            "error" -> {
+                                promptRunning = false
+                                logs = logs + LogLine(System.currentTimeMillis(), "Error: ${json.optString("content")}")
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -699,7 +719,13 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 }
                 j.put("attachments", arr)
             }
-            webSocket?.send(j.toString()); input = ""; attachments = emptyList()
+            if (webSocket?.send(j.toString()) == true) {
+                promptRunning = true
+                input = ""
+                attachments = emptyList()
+            } else {
+                logs = logs + LogLine(System.currentTimeMillis(), "Error: Could not send prompt. Reconnect the relay.")
+            }
             }
         }
     }
@@ -741,6 +767,8 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
     val isConnected = wsStatus == "connected"
     val canPrompt = isConnected && currentAgent.isNotBlank() && (currentAgent != "codex" || selectedSessionId.isNotBlank())
+    val hasDraft = input.isNotBlank() || attachments.isNotEmpty()
+    val canSubmit = canPrompt && (!promptRunning || hasDraft)
 
     // ─── QR Scanner ──────────────────────────────────────────────
     if (showQrScanner) { QrScanner(onScan = onQrScanned, onCancel = { showQrScanner = false }); return }
@@ -1102,16 +1130,25 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                     if (!isConnected) "Connect to send prompts"
                     else if (currentAgent.isBlank()) "Set agent in Settings"
                     else if (currentAgent == "codex" && selectedSessionId.isBlank()) "Pick a Codex chat first"
+                    else if (promptRunning) "Steer running turn..."
                     else if (selectedSessionTitle.isNotBlank()) "Prompt ${selectedSessionTitle.take(24)}..."
                     else "Prompt $agentName...",
                     color = if (isConnected && currentAgent.isNotBlank()) Color.Gray else Color(0xFF333333)) }
             )
             Spacer(Modifier.width(6.dp))
             Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(
-                if (canPrompt) Color(0xFF8B5CF6) else Color(0xFF1E1E24))
-                .clickable(enabled = canPrompt) { sendMsg() },
+                if (canSubmit) Color(0xFF8B5CF6) else if (promptRunning && canPrompt) Color(0xFF2F255F) else Color(0xFF1E1E24))
+                .clickable(enabled = canSubmit) { sendMsg() },
                 contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Send, contentDescription = "Send", tint = if (canPrompt) Color.White else Color(0xFF333333))
+                if (promptRunning && !hasDraft) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = Color.White)
+                } else {
+                    Icon(
+                        Icons.Default.Send,
+                        contentDescription = if (promptRunning) "Steer turn" else "Send",
+                        tint = if (canSubmit) Color.White else Color(0xFF333333)
+                    )
+                }
             }
         }
     }

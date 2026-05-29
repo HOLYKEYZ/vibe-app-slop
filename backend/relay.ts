@@ -9,9 +9,10 @@ let pty = null;
 try { pty = require('node-pty'); } catch {}
 
 const SERVER_URL = process.env.SERVER_URL || 'ws://localhost:3001';
-const WORKSPACE_CWD = path.resolve(process.env.AGENTHUB_CWD || process.env.WORKSPACE_CWD || path.join(__dirname, '..'));
+const RELAY_DIR = fs.existsSync(path.join(__dirname, 'package.json')) ? __dirname : path.join(__dirname, '..');
+const WORKSPACE_CWD = path.resolve(process.env.AGENTHUB_CWD || process.env.WORKSPACE_CWD || path.join(RELAY_DIR, '..'));
 const isWin = os.platform() === 'win32';
-const RELAY_STATE_FILE = path.join(__dirname, 'relay-state.json');
+const RELAY_STATE_FILE = path.join(RELAY_DIR, 'relay-state.json');
 
 const AGENTS = [
   { id: 'codex',    name: 'Codex',    modelKey: 'CODEX_MODEL',    cmd: process.env.CODEX_PATH || 'codex', args: p => ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', p], localPromptCli: true, jsonExec: true },
@@ -74,7 +75,7 @@ function openExternalUrl(url) {
 
 function openCodexDesktopThread(sessionId, clientId) {
   if (!sessionId || process.env.AGENTHUB_OPEN_CODEX_DESKTOP === '0') return;
-  openExternalUrl(`codex://threads/${encodeURIComponent(sessionId)}`);
+  openExternalUrl(`codex://local/${encodeURIComponent(sessionId)}`);
   if (clientId) send({ type: 'status', clientId, content: 'Opening Codex Desktop chat' });
 }
 
@@ -700,6 +701,11 @@ function toCodexAppSession(thread, loadedIds = new Set()) {
   const project = codexThreadProject(thread);
   const status = thread?.status?.type || '';
   const loaded = loadedIds.has(thread.id);
+  const latestTurnTime = Math.max(
+    0,
+    ...(thread.turns || []).flatMap((turn) => [Number(turn.startedAt || 0), Number(turn.completedAt || 0)]),
+  ) * 1000;
+  const updatedAt = Math.max(Number(thread.updatedAt || 0) * 1000, latestTurnTime);
   return {
     agent: 'codex',
     id: thread.id,
@@ -708,7 +714,7 @@ function toCodexAppSession(thread, loadedIds = new Set()) {
     directory: cwd,
     project,
     path: thread.path || '',
-    updatedAt: Number(thread.updatedAt || 0) * 1000,
+    updatedAt,
     createdAt: Number(thread.createdAt || 0) * 1000,
     originator: thread.source || '',
     status,
@@ -822,6 +828,26 @@ function parseCodexAppThreadDetail(thread) {
   };
 }
 
+async function listCodexAppTurns(threadId, limit = 60) {
+  const result = await callCodexApp('thread/turns/list', {
+    threadId,
+    limit,
+    cursor: null,
+  }, 60000);
+  return Array.isArray(result?.data) ? result.data : [];
+}
+
+async function readCodexAppThreadWithTurns(threadId, turnLimit = 60) {
+  const result = await callCodexApp('thread/read', { threadId }, 60000);
+  const thread = result?.thread || {};
+  try {
+    thread.turns = await listCodexAppTurns(threadId, turnLimit);
+  } catch (err) {
+    thread.turns = Array.isArray(thread.turns) ? thread.turns : [];
+  }
+  return thread;
+}
+
 function sendToCodexTracker(tracker, payload) {
   if (!tracker) return;
   for (const clientId of tracker.clients) {
@@ -925,13 +951,24 @@ async function listCodexAppSessions() {
     archived: false,
     sourceKinds: [],
   }, 30000);
-  return (result?.data || []).map((thread) => toCodexAppSession(thread, loadedIds)).filter((s) => s.id);
+  const threadsById = new Map((result?.data || []).filter((thread) => thread?.id).map((thread) => [thread.id, thread]));
+  for (const id of loadedIds) {
+    if (threadsById.has(id)) continue;
+    try {
+      threadsById.set(id, await readCodexAppThreadWithTurns(id, 10));
+    } catch (err) {
+      console.log(`  [codex-app] loaded thread read failed ${id}: ${err.message}`);
+    }
+  }
+  return [...threadsById.values()]
+    .map((thread) => toCodexAppSession(thread, loadedIds))
+    .filter((s) => s.id)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
 async function getCodexAppSessionDetail(sessionId) {
   await ensureCodexAppServer();
-  const result = await callCodexApp('thread/read', { threadId: sessionId, includeTurns: true }, 60000);
-  return parseCodexAppThreadDetail(result?.thread || {});
+  return parseCodexAppThreadDetail(await readCodexAppThreadWithTurns(sessionId, 80));
 }
 
 function getCodexRollouts(limit = 200) {
@@ -1206,7 +1243,8 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
   console.log(`  [codex-app] resume ${sessionId}`);
   const resumed = await callCodexApp('thread/resume', { threadId: sessionId }, 60000);
   const thread = resumed?.thread || {};
-  const activeTurn = [...(thread.turns || [])].reverse().find((turn) => turn?.status === 'inProgress' || turn?.status?.type === 'inProgress');
+  const turns = await listCodexAppTurns(sessionId, 12).catch(() => thread.turns || []);
+  const activeTurn = [...(turns || [])].reverse().find((turn) => turn?.status === 'inProgress' || turn?.status?.type === 'inProgress');
   if (thread.status?.type === 'active' && activeTurn?.id) {
     tracker.turnId = activeTurn.id;
     activeCodexByThread.set(sessionId, tracker);
@@ -1218,6 +1256,10 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
       input: [{ type: 'text', text: prompt, text_elements: [] }],
     }, 60000);
     await completion;
+    const detail = await getCodexSessionDetail(sessionId).catch(() => null);
+    if (detail) send({ type: 'session_detail', clientId, detail });
+    openCodexDesktopThread(sessionId, clientId);
+    send({ type: 'done', clientId, content: '' });
     return;
   }
 
@@ -1235,7 +1277,8 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
 
   const detail = await getCodexSessionDetail(sessionId).catch(() => null);
   if (detail) send({ type: 'session_detail', clientId, detail });
-  openCodexDesktopThread(sessionId);
+  openCodexDesktopThread(sessionId, clientId);
+  send({ type: 'done', clientId, content: '' });
 }
 
 async function sendCodexPrompt(prompt, clientId, sessionId, attachments = []) {
@@ -1338,7 +1381,7 @@ async function sendCodexPrompt(prompt, clientId, sessionId, attachments = []) {
 
 function printAgentQRCodes(code) {
   const agents = getAvailableAgents();
-  const qrFile = path.join(__dirname, '..', 'session_qr.txt');
+  const qrFile = path.join(WORKSPACE_CWD, 'session_qr.txt');
   let fileContent = '';
 
   agents.forEach((a, i) => {

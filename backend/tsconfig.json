@@ -9,7 +9,9 @@
     "checkJs": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true,
+    "noEmit": false,
+    "rootDir": ".",
+    "outDir": "dist",
     "types": ["node", "ws", "qrcode"]
   },
   "include": ["relay.ts"]

@@ -1,4 +1,8 @@
 node_modules/
+backend/dist/
+backend/relay-state.json
+backend/sessions.json
+.agenthub_probe/
 *.log
 *.apk
 *.aab

@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check:relay": "tsc --noEmit -p tsconfig.json"
+    "build:relay": "tsc -p tsconfig.json",
+    "check:relay": "tsc --noEmit -p tsconfig.json",
+    "relay": "npm run build:relay && node dist/relay.js"
   },
   "dependencies": {
     "qrcode": "^1.5.4",
