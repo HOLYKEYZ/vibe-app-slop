@@ -120,15 +120,15 @@ const server = http.createServer((req, res) => {
     res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Hub</title><style>
       *{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
       .card{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid rgba(139,92,246,.3);border-radius:20px;padding:40px 30px;text-align:center;max-width:400px;width:100%}
-      .icon{font-size:64px;margin-bottom:16px}h1{font-size:28px;margin-bottom:8px}p{color:#888;margin-bottom:24px;font-size:14px}
+      .icon{font-size:28px;margin-bottom:16px;font-weight:800;color:#a78bfa}h1{font-size:28px;margin-bottom:8px}p{color:#888;margin-bottom:24px;font-size:14px}
       .btn{display:inline-block;background:linear-gradient(135deg,#8B5CF6,#6D28D9);color:#fff;text-decoration:none;padding:16px 40px;border-radius:12px;font-size:18px;font-weight:600}
       .hint{color:#555;font-size:12px;margin-top:20px}input{padding:10px;border-radius:8px;border:0;width:100%;margin:8px 0;background:#1e1e24;color:#fff;font-size:14px}
     </style></head><body>
     <div class="card">
-      <div class="icon">🤖</div>
+      <div class="icon">AH</div>
       <h1>Agent Hub</h1>
       <p>Control Codex and OpenCode from your phone</p>
-      ${hasApk ? `<a href="/apk" class="btn">⬇ Install APK (${(fs.statSync(apkPath).size / 1024 / 1024).toFixed(1)} MB)</a>` : `<p style="color:#e88">APK not on this server.</p><p class="hint">Build locally with <code>cd AgentHub && ./gradlew assembleDebug</code> then run <code>node serve-apk.js</code> on your LAN.</p>`}
+      ${hasApk ? `<a href="/apk" class="btn">Install APK (${(fs.statSync(apkPath).size / 1024 / 1024).toFixed(1)} MB)</a>` : `<p style="color:#e88">APK not on this server.</p><p class="hint">Build locally with <code>cd AgentHub && ./gradlew assembleDebug</code> then run <code>node serve-apk.js</code> on your LAN.</p>`}
       <p class="hint">After installing, open the app and scan the QR code from your laptop's relay terminal.</p>
     </div></body></html>`);
     return;
@@ -147,7 +147,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Agent Hub Backend — see /download');
+  res.end('Agent Hub Backend - see /download');
 });
 
 const wss = new WebSocketServer({ server });
@@ -260,13 +260,13 @@ wss.on('connection', (ws) => {
     const { agent, prompt } = msg;
     if (!agent || !prompt) { send(ws, { type: 'error', content: 'Missing agent or prompt' }); return; }
 
-    // Phone → Relay
+    // Phone to relay
     if (ws._role === 'phone' && getRelayOnline(s)) {
       send(s.relayWs, { type: 'execute', agent, prompt, sessionId: msg.sessionId || '', attachments: msg.attachments || [], clientId: s.code });
       return;
     }
 
-    // Relay → Phone (stream results)
+    // Relay to phone (stream results)
     if (ws._role === 'relay' && msg.clientId) {
       const t = sessions.get(msg.clientId);
       if (t) sendToPhones(t, { type: msg.type, content: msg.content });

@@ -1,4 +1,4 @@
-﻿// @ts-nocheck
+// @ts-nocheck
 const WebSocket = require('ws');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -192,7 +192,7 @@ function writePersistedRelayCode(code) {
   } catch {}
 }
 
-// â”€â”€â”€ Detect available agents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Detect available agents
 
 function getAvailableAgents() {
   return AGENTS.filter((a) => {
@@ -208,7 +208,7 @@ function getAvailableAgents() {
   });
 }
 
-// â”€â”€â”€ WebSocket â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// WebSocket
 
 let ws, reconnectTimer, heartbeatTimer, registrationTimer, publicSessionTimer, sessionCode;
 
@@ -285,7 +285,7 @@ function connect() {
       sessionCode = msg.code;
       clearTimeout(registrationTimer);
       writePersistedRelayCode(sessionCode);
-      console.log(`\nðŸ”— Relay session: ${sessionCode}${msg.reused ? ' (reused)' : ''}\n`);
+      console.log(`\nRelay session: ${sessionCode}${msg.reused ? ' (reused)' : ''}\n`);
       printAgentQRCodes(sessionCode);
       clearInterval(publicSessionTimer);
       publicSessionTimer = setInterval(async () => {
@@ -302,7 +302,7 @@ function connect() {
 
     if (msg.type === 'execute') {
       const { agent, prompt, clientId, sessionId, attachments } = msg;
-      console.log(`\nðŸ“© ${agent}: "${prompt.slice(0, 80)}..."`);
+      console.log(`\nIncoming ${agent}: "${prompt.slice(0, 80)}..."`);
       executeAgent(agent, prompt, clientId, sessionId, attachments || []).catch((err) => {
         send({ type: 'error', clientId, content: `${agent} failed: ${err.message}` });
       });
@@ -325,17 +325,17 @@ function connect() {
     } else if (msg.type === 'pong') {
       return;
     } else if (msg.type === 'system' || msg.type === 'phone_connected') {
-      console.log(`â„¹ï¸  ${msg.content || msg.type}`);
+      console.log(`Info: ${msg.content || msg.type}`);
     }
   });
 
   socket.on('close', () => {
-    console.log('âŒ Disconnected. Reconnecting in 5s...');
+    console.log('Disconnected. Reconnecting in 5s...');
     scheduleReconnect();
   });
 
   socket.on('error', (err) => {
-    console.error(`âš ï¸  ${err.message}`);
+    console.error(`Warning: ${err.message}`);
     scheduleReconnect();
   });
 }
@@ -1506,29 +1506,31 @@ async function sendCodexPrompt(prompt, clientId, sessionId, attachments = []) {
 function printAgentQRCodes(code) {
   const agents = getAvailableAgents();
   const qrFile = path.join(WORKSPACE_CWD, 'session_qr.txt');
+  const shouldPrintQr = process.stdout.isTTY && process.env.AGENTHUB_PRINT_QR !== '0';
   let fileContent = '';
 
   agents.forEach((a, i) => {
     const qrPayload = `${SERVER_URL}?code=${code}&agent=${a.id}`;
     if (i > 0) console.log('');
-    QRCode.toString(qrPayload, { type: 'terminal', small: true }, (err, qr) => {
-      if (err) return;
-      console.log(`â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•`);
-      console.log(`  ${a.name}`);
-      console.log(`â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•`);
-      console.log(qr);
-      console.log(`   Code: ${code}`);
-      console.log(`   Agent: ${a.name}`);
-      console.log(`â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n`);
-    });
+    if (shouldPrintQr) {
+      QRCode.toString(qrPayload, { type: 'terminal', small: true }, (err, qr) => {
+        if (err) return;
+        console.log('---------------------------------------');
+        console.log(`  ${a.name}`);
+        console.log('---------------------------------------');
+        console.log(qr);
+        console.log(`   Code: ${code}`);
+        console.log(`   Agent: ${a.name}`);
+        console.log('---------------------------------------\n');
+      });
+    }
     fileContent += `Agent: ${a.name} (${a.id})\nCode: ${code}\nURL: ${qrPayload}\n\n`;
 
-    // Also print a compact one-liner
     console.log(`  [${a.id}] Code: ${code}  |  URL: ${qrPayload}\n`);
   });
 
   if (agents.length === 0) {
-    console.log('âš ï¸  No agents detected.');
+    console.log('Warning: No agents detected.');
     console.log('   Install and sign in to Codex or OpenCode.\n');
   }
 
@@ -1537,7 +1539,7 @@ function printAgentQRCodes(code) {
   } catch {}
 }
 
-// â”€â”€â”€ Agent execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Agent execution
 
 const ptySessions = new Map();
 
@@ -1661,7 +1663,7 @@ function executeAgent(agent, prompt, clientId, sessionId = '', attachments = [])
     const cmd = getCmd(a);
     const args = a.args(prompt);
     console.log(`  $ ${cmd} ${args.join(' ')}`);
-    send({ type: 'status', clientId, content: `ðŸ”„ ${a.name}...` });
+    send({ type: 'status', clientId, content: ` ${a.name} running...`.trim() });
 
     let child;
     try {
@@ -1704,25 +1706,25 @@ function executeAgent(agent, prompt, clientId, sessionId = '', attachments = [])
     child.stderr.on('data', handleData);
     child.on('error', (err) => { if (!doneSent) { doneSent = true; send({ type: 'error', clientId, content: `Failed: ${err.message}` }); resolve(); } });
     child.on('close', (code) => {
-      if (!doneSent) { doneSent = true; send({ type: 'done', clientId, content: code === 0 ? '' : `\nâš ï¸ Exit ${code}` }); }
+      if (!doneSent) { doneSent = true; send({ type: 'done', clientId, content: code === 0 ? '' : `\nExit ${code}` }); }
       resolve();
     });
-    setTimeout(() => { if (!doneSent) { doneSent = true; child.kill(); send({ type: 'done', clientId, content: '\nâ±ï¸ Timeout' }); resolve(); } }, 10 * 60 * 1000);
+    setTimeout(() => { if (!doneSent) { doneSent = true; child.kill(); send({ type: 'done', clientId, content: '\nTimeout' }); resolve(); } }, 10 * 60 * 1000);
   });
 }
 
-// â”€â”€â”€ Start â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Start
 
-console.log('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
-console.log('  Agent Hub â€” Desktop Relay');
-console.log('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+console.log('=======================================');
+console.log('  Agent Hub - Desktop Relay');
+console.log('=======================================');
 
 const agents = getAvailableAgents();
 console.log(`  Agents:   ${agents.length ? agents.map(a => a.name).join(', ') : 'none'}`);
 console.log(`  Server:   ${SERVER_URL}`);
 console.log(`  Cwd:      ${WORKSPACE_CWD}`);
 console.log(`  Mode:     Codex app-server + OpenCode session server${pty ? ' + PTY fallback' : ''}`);
-console.log('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n');
+console.log('=======================================\n');
 
 connect();
 
