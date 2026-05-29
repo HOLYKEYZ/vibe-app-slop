@@ -582,7 +582,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                                 val chatLogs = detailMessageLogs(messages)
                                 val extras = if (showTechnicalEvents) detailExtraLogs(detail, System.currentTimeMillis() + 10000) else emptyList()
                                 if (chatLogs.isNotEmpty() || extras.isNotEmpty()) logs = chatLogs + extras
-                                if (promptRunning) promptRunning = false
+                                promptRunning = detail?.optString("status") == "active"
                             }
                             "config_updated" -> {
                                 val cfg = json.optJSONObject("config")
