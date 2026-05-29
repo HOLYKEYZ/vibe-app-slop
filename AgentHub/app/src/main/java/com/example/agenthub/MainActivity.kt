@@ -858,11 +858,27 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF8B5CF6), focusedLabelColor = Color(0xFF8B5CF6),
                                 unfocusedTextColor = Color.White, focusedTextColor = Color.White, cursorColor = Color.White))
-                        if (tokenUsage.isNotBlank()) {
-                            Spacer(Modifier.height(8.dp))
-                            Text("Usage", fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6), fontSize = 14.sp)
-                            Text(tokenUsage.removePrefix("tokens:").trim(), color = Color(0xFFA7F3D0), fontSize = 12.sp)
+                        Spacer(Modifier.height(12.dp))
+                        Text("Model", fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6), fontSize = 14.sp)
+                        Button(
+                            onClick = { if (agentModels.isNotEmpty()) showModelPicker = true },
+                            enabled = agentModels.isNotEmpty(),
+                            modifier = Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(14.dp)),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2F255F), disabledContainerColor = Color(0xFF151518))
+                        ) {
+                            Text(
+                                if (agentModels.isEmpty()) "No models from relay yet" else currentModel.ifBlank { "Choose model" },
+                                color = if (agentModels.isEmpty()) Color(0xFF666666) else Color.White,
+                                fontSize = 13.sp
+                            )
                         }
+                        Spacer(Modifier.height(12.dp))
+                        Text("Usage", fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6), fontSize = 14.sp)
+                        Text(
+                            tokenUsage.removePrefix("tokens:").trim().ifBlank { "No token usage reported yet" },
+                            color = if (tokenUsage.isBlank()) Color(0xFF8F96A3) else Color(0xFFA7F3D0),
+                            fontSize = 12.sp
+                        )
                         Spacer(Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -922,11 +938,17 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             modifier = Modifier.fillMaxWidth().clickable {
                                 val j = JSONObject(); j.put("type", "select_model")
                                 j.put("agent", currentAgent); j.put("model", model)
+                                currentModel = model
                                 webSocket?.send(j.toString()); showModelPicker = false
                             }.padding(vertical = 10.dp, horizontal = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            RadioButton(selected = isCurrent, onClick = {},
+                            RadioButton(selected = isCurrent, onClick = {
+                                currentModel = model
+                                val j = JSONObject(); j.put("type", "select_model")
+                                j.put("agent", currentAgent); j.put("model", model)
+                                webSocket?.send(j.toString()); showModelPicker = false
+                            },
                                 colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF8B5CF6)))
                             Spacer(Modifier.width(8.dp))
                             Text(model, color = if (isCurrent) Color.White else Color(0xFFBBBBBB), fontSize = 13.sp)
@@ -957,9 +979,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                 }
             }
             Row {
-                if (currentModel.isNotBlank() && isConnected && agentModels.isNotEmpty()) {
-                    Text(currentModel, color = Color(0xFF8B5CF6), fontSize = 10.sp,
-                        modifier = Modifier.clickable { showModelPicker = true }.padding(end = 8.dp, top = 4.dp))
+                if (isConnected && agentModels.isNotEmpty()) {
+                    TextButton(
+                        onClick = { showModelPicker = true },
+                        modifier = Modifier.height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                    ) {
+                        Text(currentModel.ifBlank { "Model" }, color = Color(0xFF8B5CF6), fontSize = 10.sp, maxLines = 1)
+                    }
                 }
                 if (isConnected && relayOnline) {
                     IconButton(onClick = {
@@ -1178,8 +1205,11 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             Spacer(Modifier.width(6.dp))
             TextField(
                 value = input, onValueChange = { input = it },
-                modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).height(48.dp),
+                modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).heightIn(min = 48.dp, max = 140.dp),
                 enabled = canPrompt,
+                singleLine = false,
+                minLines = 1,
+                maxLines = 6,
                 colors = TextFieldDefaults.colors(focusedContainerColor = Color(0xFF1E1E24), unfocusedContainerColor = Color(0xFF1E1E24),
                     focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,

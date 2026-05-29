@@ -43,7 +43,12 @@ if (-not $SkipPowerConfig) {
 
 if ($StopExisting) {
     Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -eq "node.exe" -and $_.CommandLine -match "\brelay\.js\b" } |
+        Where-Object {
+            $_.Name -eq "node.exe" -and (
+                $_.CommandLine -match "(^|[\\\/\s])relay\.js(\s|$)" -or
+                $_.CommandLine -match "(^|[\\\/\s])dist[\\\/]relay\.js(\s|$)"
+            )
+        } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 }
 

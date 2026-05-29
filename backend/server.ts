@@ -220,7 +220,10 @@ wss.on('connection', (ws) => {
       if (!s) { send(ws, { type: 'error', content: 'No session' }); return; }
       const key = MODEL_KEY[msg.agent];
       if (key) { s.config[key] = msg.model; saveSessions(); }
-      send(ws, { type: 'config_updated', config: s.config });
+      sendToPhones(s, { type: 'config_updated', config: s.config });
+      if (getRelayOnline(s)) {
+        send(s.relayWs, { type: 'select_model', agent: msg.agent, model: msg.model });
+      }
       return;
     }
 

@@ -18,6 +18,8 @@ const AGENTS = [
   { id: 'codex',    name: 'Codex',    modelKey: 'CODEX_MODEL',    cmd: process.env.CODEX_PATH || 'codex', args: p => ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', p], localPromptCli: true, jsonExec: true },
   { id: 'opencode', name: 'OpenCode', modelKey: 'OPENCODE_MODEL', cmd: null, args: p => ['run', '--dangerously-skip-permissions', '--format', 'json', p], localPromptCli: true, serverBacked: true },
 ];
+const MODEL_KEY_BY_AGENT = Object.fromEntries(AGENTS.map(a => [a.id, a.modelKey]));
+let relayConfig = {};
 
 const PTY_AGENT_ARGS = {
   codex: (prompt, sessionId) => sessionId
@@ -96,8 +98,7 @@ function reloadCodexDesktopWindow() {
 
 function openCodexDesktopThread(sessionId, clientId) {
   if (!sessionId || process.env.AGENTHUB_OPEN_CODEX_DESKTOP === '0') return;
-  const nonce = Date.now().toString(36);
-  openExternalUrl(`codex://local/${encodeURIComponent(sessionId)}?agenthub=${nonce}`);
+  openExternalUrl(`codex://local/${encodeURIComponent(sessionId)}`);
   if (clientId) send({ type: 'status', clientId, content: 'Opening Codex Desktop chat' });
 }
 
@@ -117,6 +118,19 @@ function scheduleCodexDesktopRefreshBurst(sessionId, clientId) {
 function scheduleCodexDesktopReload(delayMs = 1200) {
   if (!isWin || process.env.AGENTHUB_RELOAD_CODEX_DESKTOP === '0') return;
   setTimeout(reloadCodexDesktopWindow, delayMs).unref?.();
+}
+
+function scheduleCodexDesktopHardRefresh(sessionId, clientId) {
+  if (!sessionId || process.env.AGENTHUB_OPEN_CODEX_DESKTOP === '0') return;
+  for (const delayMs of [0, 1000, 2500]) {
+    scheduleCodexDesktopRefresh(sessionId, delayMs === 0 ? clientId : null, delayMs);
+  }
+  if (isWin && process.env.AGENTHUB_RELOAD_CODEX_DESKTOP !== '0') {
+    setTimeout(() => {
+      reloadCodexDesktopWindow();
+      setTimeout(reloadCodexDesktopWindow, 800).unref?.();
+    }, 1600).unref?.();
+  }
 }
 
 function buildWindowsCommandLine(cmd, args) {
@@ -201,6 +215,22 @@ function readLocalConfig() {
   const cfg = { ...readCodexConfig(), ...readOpenCodeConfig() };
   cfg.LOCAL_AGENTS = getAvailableAgents().map(a => a.id);
   return cfg;
+}
+
+function getSelectedModel(agent) {
+  const key = MODEL_KEY_BY_AGENT[agent];
+  if (!key) return '';
+  return String(relayConfig[key] || process.env[key] || '').trim();
+}
+
+function setSelectedModel(agent, model) {
+  const key = MODEL_KEY_BY_AGENT[agent];
+  if (!key) return false;
+  const clean = String(model || '').trim();
+  if (!clean) return false;
+  relayConfig[key] = clean;
+  process.env[key] = clean;
+  return true;
 }
 
 function readPersistedRelayCode() {
@@ -288,8 +318,9 @@ function connect() {
   socket.on('open', () => {
     if (ws !== socket) return;
     const config = readLocalConfig();
+    relayConfig = { ...relayConfig, ...config };
     const preferredCode = process.env.AGENTHUB_RELAY_CODE || readPersistedRelayCode();
-    socket.send(JSON.stringify({ type: 'register_relay', config, preferredCode }));
+    socket.send(JSON.stringify({ type: 'register_relay', config: relayConfig, preferredCode }));
     clearTimeout(registrationTimer);
     registrationTimer = setTimeout(() => {
       if (ws === socket && !registered) {
@@ -333,6 +364,11 @@ function connect() {
       executeAgent(agent, prompt, clientId, sessionId, attachments || []).catch((err) => {
         send({ type: 'error', clientId, content: `${agent} failed: ${err.message}` });
       });
+    } else if (msg.type === 'select_model') {
+      if (setSelectedModel(msg.agent, msg.model)) {
+        console.log(`Model selected for ${msg.agent}: ${msg.model}`);
+        send({ type: 'relay_update_config', config: relayConfig });
+      }
     } else if (msg.type === 'session_list') {
       const sessions = await listLocalSessions(msg.agent);
       console.log(`  [sessions] ${sessions.length} ${msg.agent || 'all'} -> ${msg.clientId || 'unknown'}`);
@@ -1220,6 +1256,8 @@ function formatOpenCodeMessage(message) {
     role,
     text,
     time: info.time || message.time || null,
+    tokens: info.tokens || message.tokens || null,
+    cost: info.cost ?? message.cost ?? null,
   };
 }
 
@@ -1319,7 +1357,7 @@ async function sendOpenCodePrompt(prompt, clientId, sessionId, attachments = [])
   if (!target) throw new Error('OpenCode session not found.');
 
   const before = await getOpenCodeSessionDetail(target).catch(() => null);
-  const beforeCount = before?.messages?.length || 0;
+  const beforeLastAssistantId = before?.messages?.filter((m) => m.role === 'assistant').slice(-1)[0]?.id || '';
   send({ type: 'status', clientId, content: `Sending to OpenCode session ${target}` });
   await requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(target)}/prompt_async`, {
     method: 'POST',
@@ -1327,29 +1365,42 @@ async function sendOpenCodePrompt(prompt, clientId, sessionId, attachments = [])
   });
   send({ type: 'status', clientId, content: `OpenCode accepted prompt for ${target}` });
 
-  for (let i = 0; i < 30; i++) {
+  let sawAssistant = false;
+  for (let i = 0; i < 90; i++) {
     await sleep(2000);
     const detail = await getOpenCodeSessionDetail(target).catch(() => null);
     if (detail?.messages?.length) {
-      const fresh = detail.messages.slice(beforeCount);
-      const latestAssistant = fresh.filter((m) => m.role === 'assistant' && m.text).slice(-1)[0];
-      if (latestAssistant) send({ type: 'replace_stream', clientId, content: latestAssistant.text });
+      const latestAssistant = detail.messages
+        .filter((m) => m.role === 'assistant' && m.text && m.id !== beforeLastAssistantId)
+        .slice(-1)[0];
+      if (latestAssistant) {
+        sawAssistant = true;
+        send({ type: 'replace_stream', clientId, content: latestAssistant.text });
+        const usage = usageSummary({ tokens: latestAssistant.tokens });
+        if (usage) send({ type: 'status', clientId, content: usage });
+      }
     }
     const statusJson = await requestJson(`${OPENCODE_BASE_URL}/session/status`).catch(() => null);
     const statuses = statusJson?.value || statusJson?.data || statusJson || {};
     const current = statuses[target];
-    if (!current || current.status === 'idle' || current === 'idle') break;
+    if ((!current || current.status === 'idle' || current === 'idle') && (sawAssistant || i >= 3)) break;
   }
   const detail = await getOpenCodeSessionDetail(target).catch(() => null);
   if (detail) send({ type: 'session_detail', clientId, detail });
   send({ type: 'done', clientId, content: '' });
 }
 
+function tomlString(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 function codexExecArgs(prompt, sessionId) {
+  const model = getSelectedModel('codex');
+  const configArgs = model ? ['-c', `model=${tomlString(model)}`] : [];
   if (sessionId) {
-    return ['exec', 'resume', '--json', '--dangerously-bypass-approvals-and-sandbox', sessionId, prompt];
+    return ['exec', ...configArgs, 'resume', '--json', '--dangerously-bypass-approvals-and-sandbox', sessionId, prompt];
   }
-  return ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', prompt];
+  return ['exec', ...configArgs, '--json', '--dangerously-bypass-approvals-and-sandbox', prompt];
 }
 
 function formatCodexJsonEvent(ev) {
@@ -1395,6 +1446,11 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
   send({ type: 'status', clientId, content: `Opening Codex chat ${sessionId}` });
   console.log(`  [codex-app] resume ${sessionId}`);
   const resumed = await callCodexApp('thread/resume', { threadId: sessionId }, 60000);
+  const selectedModel = getSelectedModel('codex');
+  if (selectedModel) {
+    await callCodexApp('thread/settings/update', { threadId: sessionId, model: selectedModel }, 60000)
+      .catch((err) => console.warn(`  [codex-app] model update failed: ${err.message}`));
+  }
   scheduleCodexDesktopRefreshBurst(sessionId, clientId);
   const thread = resumed?.thread || {};
   const turns = await listCodexAppTurns(sessionId, 12).catch(() => thread.turns || []);
@@ -1428,8 +1484,7 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
     await tracker.completion;
     const detail = await getCodexSessionDetail(sessionId).catch(() => null);
     if (detail) send({ type: 'session_detail', clientId, detail });
-    scheduleCodexDesktopRefreshBurst(sessionId, clientId);
-    scheduleCodexDesktopReload();
+    scheduleCodexDesktopHardRefresh(sessionId, clientId);
     send({ type: 'done', clientId, content: '' });
     return;
   }
@@ -1443,6 +1498,7 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
   const started = await callCodexApp('turn/start', {
     threadId: sessionId,
     input: [{ type: 'text', text: prompt, text_elements: [] }],
+    ...(selectedModel ? { model: selectedModel } : {}),
   }, 60000);
   tracker.turnId = started?.turn?.id || tracker.turnId;
 
@@ -1450,8 +1506,7 @@ async function sendCodexAppPrompt(prompt, clientId, sessionId) {
 
   const detail = await getCodexSessionDetail(sessionId).catch(() => null);
   if (detail) send({ type: 'session_detail', clientId, detail });
-  scheduleCodexDesktopRefreshBurst(sessionId, clientId);
-  scheduleCodexDesktopReload();
+  scheduleCodexDesktopHardRefresh(sessionId, clientId);
   send({ type: 'done', clientId, content: '' });
 }
 

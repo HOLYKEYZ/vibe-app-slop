@@ -4,6 +4,11 @@ Remote control Codex and OpenCode from your phone through a desktop relay.
 
 ![Agent Hub phone relay chat](docs/screenshots/phone-relay-chat.jpeg)
 
+Latest phone-side debug capture showing the Codex Desktop stale-view case that
+the relay now tries to force-refresh after phone turns:
+
+![Agent Hub phone debug capture](docs/screenshots/phone-desktop-stale.jpg)
+
 ```text
 Phone --wss--> Relay Server <--wss-- Laptop relay
                                       |-- Codex local session
@@ -21,6 +26,8 @@ Phone --wss--> Relay Server <--wss-- Laptop relay
 - Running-turn composer: while a turn is active, the send button shows progress; typing a draft changes it back to send so the prompt is steered into the active turn.
 - Chat controls: refresh chat lists, collapse/show the chat list, copy the visible transcript, and jump back to the latest message when scrolled up.
 - In-app update entry: Settings includes an update-page button for grabbing the latest APK.
+- Model controls: Settings and the top bar can switch the current relay model; Codex app-server turns receive the selected model override.
+- Token usage: Settings keeps the latest token usage summary reported by Codex or OpenCode turns.
 - Desktop relay persistence: the relay keeps the same code across reconnects unless `backend/relay-state.json` is deleted or `AGENTHUB_RELAY_CODE` is changed.
 - Background-friendly Android client: keeps the screen awake while open, preserves the selected chat/transcript, reconnects after socket drops, and refreshes state on resume.
 - Voice input: Android/Google speech-to-text can fill the prompt box directly.
