@@ -54,6 +54,7 @@ import okhttp3.*
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.delay
+import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -216,15 +217,28 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         }
     }
 
+    fun readUriBytesBounded(uri: android.net.Uri, maxBytes: Int): ByteArray {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(64 * 1024)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > maxBytes) throw IllegalArgumentException("${displayNameForUri(uri)} is over ${maxBytes / 1024 / 1024} MB")
+                out.write(buffer, 0, read)
+            }
+            return out.toByteArray()
+        }
+        throw IllegalArgumentException("Could not open ${displayNameForUri(uri)}")
+    }
+
     val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         val added = mutableListOf<PendingAttachment>()
         for (uri in uris.take(10)) {
             try {
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: continue
-                if (bytes.size > 8 * 1024 * 1024) {
-                    logs = logs + LogLine(System.currentTimeMillis(), "Error: ${displayNameForUri(uri)} is over 8 MB")
-                    continue
-                }
+                val bytes = readUriBytesBounded(uri, 8 * 1024 * 1024)
                 added += PendingAttachment(
                     name = displayNameForUri(uri),
                     mime = context.contentResolver.getType(uri) ?: "application/octet-stream",
@@ -330,29 +344,19 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         val out = mutableListOf<LogLine>()
         var next = startId
         val commands = detail.optJSONArray("commands")
-        if (commands != null) {
-            for (i in 0 until commands.length()) {
-                val obj = commands.optJSONObject(i) ?: continue
-                val command = obj.optString("command").ifBlank { obj.optString("name") }
-                if (command.isNotBlank()) out += LogLine(next++, "command: $command", "tool")
-            }
+        if (commands != null && commands.length() > 0) {
+            out += LogLine(next++, "commands run: ${commands.length()}", "tool")
         }
         val tools = detail.optJSONArray("tools")
-        if (tools != null) {
-            for (i in 0 until tools.length()) {
-                val obj = tools.optJSONObject(i) ?: continue
-                val name = obj.optString("name", "tool")
-                val args = obj.optString("arguments")
-                out += LogLine(next++, if (args.isBlank()) "tool: $name" else "tool: $name\n$args", "tool")
-            }
+        if (tools != null && tools.length() > 0) {
+            val names = (0 until tools.length()).mapNotNull { i ->
+                tools.optJSONObject(i)?.optString("name")?.takeIf { it.isNotBlank() }
+            }.distinct().take(6)
+            out += LogLine(next++, if (names.isEmpty()) "tools used: ${tools.length()}" else "tools used: ${names.joinToString(", ")}", "tool")
         }
         val files = detail.optJSONArray("files")
         if (files != null && files.length() > 0) {
-            val allFiles = (0 until files.length()).mapNotNull { i -> files.optString(i).takeIf { it.isNotBlank() } }
-            val shown = allFiles.take(30).joinToString("\n") { "file: $it" }
-            val hidden = allFiles.size - 30
-            val text = if (hidden > 0) "$shown\nfile: ... $hidden more" else shown
-            if (text.isNotBlank()) out += LogLine(next++, text, "file")
+            out += LogLine(next++, "files touched: ${files.length()}", "file")
         }
         val diff = detail.optJSONArray("diff")
         if (diff != null && diff.length() > 0) {
@@ -542,7 +546,12 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             if (event == Lifecycle.Event.ON_PAUSE) {
                 hasPausedOnce = true
             } else if (event == Lifecycle.Event.ON_RESUME && hasPausedOnce && sessionCode.isNotBlank()) {
-                connectWs(null, null)
+                if (wsStatus == "connected") {
+                    if (relayOnline && showChats) requestSessions("", webSocket)
+                    sessions.firstOrNull { it.id == selectedSessionId }?.let { requestSessionDetail(it, webSocket) }
+                } else {
+                    connectWs(null, null)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -562,6 +571,13 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             if (sessions.isEmpty()) requestSessions("", socket)
             delay(2400)
             if (sessions.isEmpty()) requestSessions("", socket)
+        }
+    }
+
+    LaunchedEffect(wsStatus, sessionCode, serverUrl) {
+        if (wsStatus == "disconnected" && sessionCode.isNotBlank()) {
+            delay(1500)
+            if (wsStatus == "disconnected") connectWs(null, null)
         }
     }
 
@@ -920,7 +936,13 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             }
             Spacer(Modifier.width(6.dp))
             IconButton(
-                onClick = { fileLauncher.launch("*/*") },
+                onClick = {
+                    try {
+                        fileLauncher.launch("*/*")
+                    } catch (e: Exception) {
+                        logs = logs + LogLine(System.currentTimeMillis(), "Error: File picker unavailable (${e.message})")
+                    }
+                },
                 enabled = canPrompt,
                 modifier = Modifier.size(44.dp).clip(CircleShape).background(Color(0xFF1E1E24))
             ) {

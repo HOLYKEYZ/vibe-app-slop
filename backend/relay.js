@@ -954,12 +954,11 @@ async function listLocalSessions(agent) {
 function formatOpenCodePart(part) {
   if (!part) return '';
   if (part.type === 'text') return part.text || '';
+  if (part.type === 'reasoning' || part.type === 'step-start' || part.type === 'step-finish') return '';
   if (part.type === 'tool') {
     const status = part.state?.status || '';
     const title = part.state?.title || part.tool || 'tool';
-    const input = part.state?.input ? `\ninput: ${JSON.stringify(part.state.input)}` : '';
-    const output = part.state?.output ? `\noutput: ${String(part.state.output).slice(0, 4000)}` : '';
-    return `[tool:${title}${status ? ` ${status}` : ''}]${input}${output}`;
+    return `[tool:${title}${status ? ` ${status}` : ''}]`;
   }
   if (part.type === 'file') return `[file:${part.filename || part.url || 'attachment'}]`;
   return `[${part.type || 'part'}]`;
@@ -1073,6 +1072,8 @@ async function sendOpenCodePrompt(prompt, clientId, sessionId, attachments = [])
   }
   if (!target) throw new Error('OpenCode session not found.');
 
+  const before = await getOpenCodeSessionDetail(target).catch(() => null);
+  const beforeCount = before?.messages?.length || 0;
   send({ type: 'status', clientId, content: `Sending to OpenCode session ${target}` });
   await requestJson(`${OPENCODE_BASE_URL}/session/${encodeURIComponent(target)}/prompt_async`, {
     method: 'POST',
@@ -1084,14 +1085,17 @@ async function sendOpenCodePrompt(prompt, clientId, sessionId, attachments = [])
     await sleep(2000);
     const detail = await getOpenCodeSessionDetail(target).catch(() => null);
     if (detail?.messages?.length) {
-      const latest = detail.messages.slice(-6).map((m) => `${m.role}: ${m.text}`).join('\n\n');
-      send({ type: 'replace_stream', clientId, content: latest });
+      const fresh = detail.messages.slice(beforeCount);
+      const latestAssistant = fresh.filter((m) => m.role === 'assistant' && m.text).slice(-1)[0];
+      if (latestAssistant) send({ type: 'replace_stream', clientId, content: latestAssistant.text });
     }
     const statusJson = await requestJson(`${OPENCODE_BASE_URL}/session/status`).catch(() => null);
     const statuses = statusJson?.value || statusJson?.data || statusJson || {};
     const current = statuses[target];
     if (!current || current.status === 'idle' || current === 'idle') break;
   }
+  const detail = await getOpenCodeSessionDetail(target).catch(() => null);
+  if (detail) send({ type: 'session_detail', clientId, detail });
   send({ type: 'done', clientId, content: '' });
 }
 

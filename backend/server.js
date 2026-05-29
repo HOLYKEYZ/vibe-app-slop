@@ -280,9 +280,11 @@ wss.on('connection', (ws) => {
     const s = ws._code ? sessions.get(ws._code) : null;
     if (!s) return;
     if (ws._role === 'relay') {
-      s.relayWs = null;
-      sendToPhones(s, { type: 'status', content: 'Desktop relay offline. Local agents unavailable.' });
-      saveSessions();
+      if (s.relayWs === ws) {
+        s.relayWs = null;
+        sendToPhones(s, { type: 'status', content: 'Desktop relay offline. Local agents unavailable.' });
+        saveSessions();
+      }
     } else if (ws._role === 'phone') {
       ensurePhoneSockets(s).delete(ws);
       if (s.phoneWs === ws) s.phoneWs = null;
