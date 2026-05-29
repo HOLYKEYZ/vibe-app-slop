@@ -52,9 +52,9 @@ async function waitForOnline(label, seconds) {
 }
 
 async function main() {
-  let server = startNode('server.js', { PORT: String(port), AGENTHUB_SESSIONS_FILE: sessionsFile });
+  let server = startNode(path.join('dist', 'server.js'), { PORT: String(port), AGENTHUB_SESSIONS_FILE: sessionsFile });
   await delay(1500);
-  const relay = startNode('relay.js', {
+  const relay = startNode(path.join('dist', 'relay.js'), {
     SERVER_URL: `ws://127.0.0.1:${port}`,
     AGENTHUB_RELAY_CODE: code,
     AGENTHUB_OPEN_CODEX_DESKTOP: '0',
@@ -63,7 +63,7 @@ async function main() {
   const first = await waitForOnline('initial', 45);
   stop(server);
   await delay(4000);
-  server = startNode('server.js', { PORT: String(port), AGENTHUB_SESSIONS_FILE: sessionsFile });
+  server = startNode(path.join('dist', 'server.js'), { PORT: String(port), AGENTHUB_SESSIONS_FILE: sessionsFile });
   const second = await waitForOnline('after_backend_restart', Math.ceil(timeoutMs / 1000));
 
   console.log(JSON.stringify({ passed: true, code, port, first, second }, null, 2));

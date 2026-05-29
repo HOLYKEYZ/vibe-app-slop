@@ -14,5 +14,5 @@
     "outDir": "dist",
     "types": ["node", "ws", "qrcode"]
   },
-  "include": ["relay.ts"]
+  "include": ["relay.ts", "server.ts"]
 }

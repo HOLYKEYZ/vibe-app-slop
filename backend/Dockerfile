@@ -3,9 +3,10 @@ FROM node:20-slim
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm install --production
+RUN npm install
 
-COPY server.js ./
+COPY tsconfig.json server.ts relay.ts ./
+RUN npm run build && npm prune --production
 
 EXPOSE 3001
-CMD ["node", "server.js"]
+CMD ["node", "dist/server.js"]

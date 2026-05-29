@@ -176,16 +176,8 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
     var input by remember { mutableStateOf("") }
     var logs by remember {
-        val savedTranscript = prefs.getString("LAST_TRANSCRIPT", "").orEmpty()
-            .takeLast(MAX_PERSISTED_TRANSCRIPT_CHARS)
-        val savedLogs = savedTranscript
-            .split(Regex("\\n\\s*\\n"))
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .takeLast(MAX_RENDERED_LOG_LINES)
-            .mapIndexed { index, text -> LogLine(System.currentTimeMillis() + index, text, "append") }
         mutableStateOf(
-            savedLogs
+            restoreTranscriptLogs(prefs.getString("LAST_TRANSCRIPT", "").orEmpty())
         )
     }
     var wsStatus by remember { mutableStateOf("connecting") }
@@ -204,6 +196,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var selectedSessionTitle by remember { mutableStateOf(prefs.getString("SELECTED_SESSION_TITLE", "") ?: "") }
     var agentModels by remember { mutableStateOf(listOf<String>()) }
     var currentModel by remember { mutableStateOf("") }
+    var tokenUsage by remember { mutableStateOf(prefs.getString("TOKEN_USAGE", "") ?: "") }
     var connectionSeq by remember { mutableStateOf(0L) }
     var hasPausedOnce by remember { mutableStateOf(false) }
     var attachments by remember { mutableStateOf(listOf<PendingAttachment>()) }
@@ -332,29 +325,21 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     }
 
     fun consolidatedLogs(): List<LogLine> {
-        val consolidated = mutableListOf<LogLine>()
-        for (log in logs.takeLast(MAX_RENDERED_LOG_LINES * 2)) {
-            if (log.type == "replace" && consolidated.isNotEmpty() && consolidated.last().type == "replace") {
-                consolidated[consolidated.size - 1] = log
-            } else {
-                consolidated.add(log)
-            }
-        }
-        return consolidated.takeLast(MAX_RENDERED_LOG_LINES)
+        return consolidateLogs(logs)
     }
 
     fun visibleTranscript(): String {
-        return consolidatedLogs().map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n").takeLast(MAX_PERSISTED_TRANSCRIPT_CHARS)
+        return visibleTranscriptFrom(logs)
     }
 
     fun appendLog(line: LogLine) {
-        if (logs.lastOrNull()?.text == line.text && logs.lastOrNull()?.type == line.type) return
-        logs = (logs + line).takeLast(MAX_RENDERED_LOG_LINES * 2)
+        logs = appendBoundedLog(logs, line)
     }
 
     fun statusLogType(text: String): String {
         val value = text.trim()
         return when {
+            value.startsWith("tokens:") -> "status"
             value.startsWith("command:") || value.startsWith("tool:") || value.startsWith("web_search") ||
                 value.startsWith("tool_search") || value.startsWith("mcp_") || value.startsWith("patch_") ||
                 value.startsWith("thinking") || value.startsWith("browser/search") ||
@@ -362,6 +347,20 @@ fun AgentHubScreen(initialDeepLink: String = "") {
             value.startsWith("file:") || value.startsWith("files:") || value.startsWith("file diff:") -> "file"
             else -> "status"
         }
+    }
+
+    fun afterPrefix(raw: String): String {
+        return raw.substringAfter(':', raw).trim()
+    }
+
+    fun compactPathList(raw: String): String {
+        val items = raw.lines()
+            .map { it.substringAfter(':', it).trim() }
+            .filter { it.isNotBlank() }
+            .map { it.replace("\\", "/").substringAfterLast("/") }
+            .distinct()
+            .take(6)
+        return items.joinToString(", ")
     }
 
     fun detailExtraLogs(detail: JSONObject?, startId: Long): List<LogLine> {
@@ -402,10 +401,15 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         val lower = raw.lowercase()
         val summary = when {
             lower.startsWith("command output:") -> null
-            lower.startsWith("command:") -> "Running command"
-            lower.startsWith("tool:") || lower.startsWith("mcp_") || lower.startsWith("patch_") -> "Using tool"
+            lower.startsWith("tokens:") -> raw
+            lower.startsWith("command:") -> "Command: ${afterPrefix(raw).take(180)}"
+            lower.startsWith("tool:") -> "Tool: ${afterPrefix(raw).take(140)}"
+            lower.startsWith("mcp_") || lower.startsWith("patch_") -> "Tool: ${raw.take(140)}"
             lower.startsWith("web_search") || lower.startsWith("tool_search") || lower.contains("browser") -> "Using browser/search"
-            lower.startsWith("file diff:") || lower.startsWith("file:") || lower.startsWith("files:") -> "Editing files"
+            lower.startsWith("file diff:") || lower.startsWith("file:") || lower.startsWith("files:") -> {
+                val files = compactPathList(raw)
+                if (files.isBlank()) "Editing files" else "Files: $files"
+            }
             lower.startsWith("thinking") -> "Thinking"
             lower.startsWith("opening codex chat") -> "Opening selected Codex chat"
             lower.startsWith("starting codex turn") -> "Starting Codex turn"
@@ -442,8 +446,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
         logs = logs + LogLine(System.currentTimeMillis(), "Copied visible transcript")
     }
 
+    fun compactLocalPaths(text: String): String {
+        return text.replace(Regex("[A-Za-z]:\\\\(?:[^\\\\\\n]+\\\\)+([^\\\\\\n)]+)")) {
+            it.groupValues[1]
+        }
+    }
+
     fun compactChatText(text: String): String {
-        val cleaned = stripAnsi(text).trim()
+        val cleaned = compactLocalPaths(stripAnsi(text).trim())
         val looksLikeTerminalPaste = cleaned.contains("Windows PowerShell") ||
             cleaned.contains("node relay.js") ||
             cleaned.contains("════════") ||
@@ -612,6 +622,10 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             "status", "system" -> {
                                 val content = json.optString("content")
                                 val lower = content.lowercase(Locale.ROOT)
+                                if (lower.startsWith("tokens:")) {
+                                    tokenUsage = content.trim()
+                                    prefs.edit().putString("TOKEN_USAGE", tokenUsage).apply()
+                                }
                                 if (lower.contains("starting") || lower.contains("steering") || lower.contains("working") || lower.contains("codex started")) {
                                     promptRunning = true
                                 } else if (lower.contains("finished") || lower.contains("completed") || lower.contains("exited")) {
@@ -834,6 +848,11 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                             singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF8B5CF6), focusedLabelColor = Color(0xFF8B5CF6),
                                 unfocusedTextColor = Color.White, focusedTextColor = Color.White, cursorColor = Color.White))
+                        if (tokenUsage.isNotBlank()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("Usage", fontWeight = FontWeight.Bold, color = Color(0xFF8B5CF6), fontSize = 14.sp)
+                            Text(tokenUsage.removePrefix("tokens:").trim(), color = Color(0xFFA7F3D0), fontSize = 12.sp)
+                        }
                         Spacer(Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1002,7 +1021,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                         Spacer(Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(session.title, color = Color.White, fontSize = 12.sp, maxLines = 1)
-                            if (session.subtitle.isNotBlank()) Text(session.subtitle, color = Color(0xFF7B7F8A), fontSize = 10.sp, maxLines = 1)
+                            if (session.subtitle.isNotBlank()) Text(compactLocalPaths(session.subtitle), color = Color(0xFF7B7F8A), fontSize = 10.sp, maxLines = 1)
                         }
                         Text(AGENT_NAMES[session.agent] ?: session.agent, color = Color(0xFFB8A7FF), fontSize = 10.sp)
                     }
@@ -1026,8 +1045,14 @@ fun AgentHubScreen(initialDeepLink: String = "") {
                         onClick = {
                             scrollScope.launch {
                                 val count = consolidatedLogs().size
-                                if (count > 0) listState.scrollToItem(count - 1)
                                 stickToBottom = true
+                                if (count > 0) {
+                                    listState.scrollToItem(count - 1)
+                                    delay(80)
+                                    listState.animateScrollToItem(count - 1)
+                                    delay(120)
+                                    listState.scrollToItem(count - 1)
+                                }
                             }
                         },
                         modifier = Modifier.align(Alignment.BottomEnd).size(44.dp)

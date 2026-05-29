@@ -953,6 +953,31 @@ function attachCodexTrackerClient(tracker, clientId) {
   return tracker;
 }
 
+function numberFromUsage(obj, keys) {
+  for (const key of keys) {
+    const value = obj?.[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+function usageSummary(value) {
+  if (!value || typeof value !== 'object') return '';
+  const usage = value.usage || value.token_usage || value.tokens || value;
+  const input = numberFromUsage(usage, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens']);
+  const output = numberFromUsage(usage, ['output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens']);
+  const cached = numberFromUsage(usage, ['cached_input_tokens', 'cachedInputTokens', 'cached_tokens', 'cachedTokens']);
+  const reasoning = numberFromUsage(usage, ['reasoning_tokens', 'reasoningTokens']);
+  const total = numberFromUsage(usage, ['total_tokens', 'totalTokens']) || input + output;
+  const parts = [];
+  if (total) parts.push(`total ${total}`);
+  if (input) parts.push(`in ${input}`);
+  if (output) parts.push(`out ${output}`);
+  if (cached) parts.push(`cached ${cached}`);
+  if (reasoning) parts.push(`reasoning ${reasoning}`);
+  return parts.length ? `tokens: ${parts.join(' | ')}` : '';
+}
+
 function trackerForNotification(params) {
   const tracker = activeCodexByThread.get(params.threadId);
   if (!tracker) return null;
@@ -1018,6 +1043,8 @@ function handleCodexAppNotification(method, params) {
 
   if (method === 'rawResponseItem/completed') {
     const item = params.item || {};
+    const usage = usageSummary(item);
+    if (usage) sendToCodexTracker(tracker, { type: 'status', content: usage });
     if (/web_search|tool_search|browser|mcp|function_call|custom_tool_call|local_shell/i.test(item.type || '')) {
       sendToCodexTracker(tracker, { type: 'status', content: `${item.type}: ${summarizeToolPayload(item, 1000)}` });
     }
@@ -1025,6 +1052,8 @@ function handleCodexAppNotification(method, params) {
   }
 
   if (method === 'turn/completed') {
+    const usage = usageSummary(params.turn || params);
+    if (usage) sendToCodexTracker(tracker, { type: 'status', content: usage });
     const status = params.turn?.status;
     const failed = status && typeof status === 'object' && status.type === 'failed';
     if (failed) {

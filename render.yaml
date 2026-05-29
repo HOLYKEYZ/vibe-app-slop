@@ -5,8 +5,8 @@ services:
     region: oregon
     plan: free
     rootDir: backend
-    buildCommand: npm install
-    startCommand: node server.js
+    buildCommand: npm install && npm run build
+    startCommand: node dist/server.js
     healthCheckPath: /health
     envVars:
       - key: PORT

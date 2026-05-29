@@ -36,7 +36,8 @@ Phone --wss--> Relay Server <--wss-- Laptop relay
 git clone https://github.com/HOLYKEYZ/vibe-app-slop.git
 cd vibe-app-slop/backend
 npm install
-node server.js
+npm run build
+npm start
 ```
 
 Deploy `backend/` on Render as a Node.js web service. Port `3001`.
@@ -61,7 +62,7 @@ On Windows with USB debugging enabled, install the current debug APK directly:
 ```bash
 cd backend
 npm install
-SERVER_URL=wss://your-server.onrender.com node relay.js
+SERVER_URL=wss://your-server.onrender.com npm run relay
 ```
 
 The relay checks for signed-in local Codex/OpenCode installs and prints a QR code. Secrets stay on the laptop.
@@ -71,7 +72,7 @@ On Windows PowerShell:
 ```powershell
 cd C:\Users\USER\.vscode\vibe_app_slop\backend
 $env:SERVER_URL="wss://agent-hub-backend-wk48.onrender.com"
-node relay.js
+npm run relay
 ```
 
 For the current Windows laptop workflow, use the keep-awake launcher from the repo root:
@@ -87,7 +88,7 @@ To force a new code:
 ```powershell
 Remove-Item .\relay-state.json -Force -ErrorAction SilentlyContinue
 $env:SERVER_URL="wss://agent-hub-backend-wk48.onrender.com"
-node relay.js
+npm run relay
 ```
 
 ### 4. Connect your phone
@@ -125,14 +126,14 @@ node .\scripts\relay-smoke.js
 | Codex | Local `codex app-server` API first; CLI JSON resume only if explicitly enabled with `AGENTHUB_CODEX_CLI_FALLBACK=1` |
 | OpenCode | Local `opencode serve` HTTP API on `127.0.0.1:4096` |
 
-`backend/relay.ts` is the relay source file. `backend/relay.js` is only the compatibility launcher used by `node relay.js`; it builds/loads `backend/dist/relay.js`.
+`backend/server.ts` and `backend/relay.ts` are the backend source files. Runtime JavaScript is generated into `backend/dist/` by `npm run build`.
 
 ## Environment
 
 | Env | Default | Description |
 |-----|---------|-------------|
 | `PORT` | `3001` | Relay server port |
-| `SERVER_URL` | `ws://localhost:3001` | Relay server URL used by `relay.js` |
+| `SERVER_URL` | `ws://localhost:3001` | Relay server URL used by the compiled relay |
 | `AGENTHUB_CWD` | repo root | Working directory for local agents |
 | `OPENCODE_PORT` | `4096` | Local OpenCode server port |
 | `CODEX_APP_SERVER_URL` | `ws://127.0.0.1:4545` | Local Codex app-server URL |

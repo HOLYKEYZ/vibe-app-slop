@@ -2,10 +2,11 @@
   "name": "agent-hub-backend",
   "version": "1.0.0",
   "description": "Agent Hub - Remote mobile controller for Codex and OpenCode",
-  "main": "server.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node server.js",
-    "build:relay": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "build:relay": "npm run build",
     "check:relay": "tsc --noEmit -p tsconfig.json",
     "relay": "npm run build:relay && node dist/relay.js",
     "smoke:relay": "node ../scripts/relay-smoke.js"

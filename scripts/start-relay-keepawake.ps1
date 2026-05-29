@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $backendDir = Join-Path $repoRoot "backend"
 $nodeExe = "node"
+$npmExe = "npm.cmd"
 
 function Invoke-PowerCfgSafe {
     param([string[]]$ArgsToPass)
@@ -54,7 +55,9 @@ if ($RelayCode.Trim().Length -gt 0) {
 if ($Foreground) {
     Push-Location $backendDir
     try {
-        & $nodeExe relay.js
+        & $npmExe run build
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & $nodeExe dist\relay.js
     } finally {
         Pop-Location
     }
@@ -63,7 +66,14 @@ if ($Foreground) {
 
 $logPath = Join-Path $env:TEMP "agenthub-render-relay-live.log"
 $errPath = Join-Path $env:TEMP "agenthub-render-relay-live.err.log"
-$process = Start-Process -FilePath $nodeExe -ArgumentList "relay.js" -WorkingDirectory $backendDir `
+Push-Location $backendDir
+try {
+    & $npmExe run build
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} finally {
+    Pop-Location
+}
+$process = Start-Process -FilePath $nodeExe -ArgumentList "dist\relay.js" -WorkingDirectory $backendDir `
     -RedirectStandardOutput $logPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 
 Write-Host "Agent Hub relay started."
