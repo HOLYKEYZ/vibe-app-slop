@@ -193,6 +193,7 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     var connectionSeq by remember { mutableStateOf(0L) }
     var hasPausedOnce by remember { mutableStateOf(false) }
     var attachments by remember { mutableStateOf(listOf<PendingAttachment>()) }
+    var lastConnectAttemptAt by remember { mutableStateOf(0L) }
 
     var sessionCode by remember { mutableStateOf(prefs.getString("SESSION_CODE", "") ?: "") }
     var serverUrl by remember { mutableStateOf(prefs.getString("SERVER_URL", "wss://agent-hub-backend-wk48.onrender.com") ?: "") }
@@ -392,9 +393,17 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     val listState = rememberLazyListState()
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val connectWs = { urlOverride: String?, codeOverride: String? ->
+    val connectWs = connectWs@{ urlOverride: String?, codeOverride: String? ->
         val targetServerUrl = (urlOverride ?: serverUrl).trim()
         val targetSessionCode = codeOverride ?: sessionCode
+        val now = System.currentTimeMillis()
+        if (targetServerUrl.isBlank()) {
+            wsStatus = "disconnected"
+            logs = logs + LogLine(System.currentTimeMillis(), "Error: Server URL is empty")
+            return@connectWs
+        }
+        if (wsStatus == "connecting" && now - lastConnectAttemptAt < 2500) return@connectWs
+        lastConnectAttemptAt = now
         connectionSeq += 1
         val seq = connectionSeq
         wsStatus = "connecting"
@@ -561,7 +570,12 @@ fun AgentHubScreen(initialDeepLink: String = "") {
     LaunchedEffect(logs) {
         val text = visibleTranscript()
         prefs.edit().putString("LAST_TRANSCRIPT", text.takeLast(200000)).apply()
-        if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+        val renderedCount = consolidatedLogs().size
+        if (renderedCount > 0) {
+            try {
+                listState.animateScrollToItem(renderedCount - 1)
+            } catch (_: Exception) {}
+        }
     }
 
     LaunchedEffect(relayOnline, showChats, webSocket) {
@@ -576,7 +590,9 @@ fun AgentHubScreen(initialDeepLink: String = "") {
 
     LaunchedEffect(wsStatus, sessionCode, serverUrl) {
         if (wsStatus == "disconnected" && sessionCode.isNotBlank()) {
-            delay(1500)
+            val seqAtSchedule = connectionSeq
+            delay(3000)
+            if (connectionSeq != seqAtSchedule) return@LaunchedEffect
             if (wsStatus == "disconnected") connectWs(null, null)
         }
     }
